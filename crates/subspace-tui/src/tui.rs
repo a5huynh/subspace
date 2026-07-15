@@ -9,7 +9,7 @@ use ratatui::prelude::*;
 use ratatui::widgets::*;
 use tokio::sync::mpsc;
 
-use pingspace::agent::{Agent, AgentEvent};
+use subspace::agent::{Agent, AgentEvent};
 
 // ---------------------------------------------------------------------------
 // Display messages — what we render in the chat pane
@@ -453,7 +453,7 @@ fn draw_chat(f: &mut Frame, area: Rect, state: &mut TuiState) {
         .block(
             Block::default()
                 .borders(Borders::ALL)
-                .title(" pingspace ")
+                .title(" subspace ")
                 .title_alignment(Alignment::Center),
         )
         .wrap(Wrap { trim: false })

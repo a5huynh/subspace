@@ -1,14 +1,14 @@
 [package]
-name = "pingspace-tui"
+name = "subspace-tui"
 version = "0.1.0"
 edition = "2024"
 
 [[bin]]
-name = "pingspace"
+name = "subspace"
 path = "src/main.rs"
 
 [dependencies]
-pingspace = { path = "../pingspace" }
+subspace = { path = "../subspace" }
 
 # Async runtime
 tokio = { version = "1", features = ["full"] }

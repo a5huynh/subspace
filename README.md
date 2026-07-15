@@ -1,4 +1,4 @@
-# 🛰️ Pingspace
+# 🛰️ Subspace
 
 A Rust agent harness and orchestration library. Think [pi](https://github.com/mariozechner/pi-coding-agent) but as an embeddable Rust library with first-class support for multi-agent orchestration via a supervisor model.
 
@@ -6,7 +6,7 @@ A Rust agent harness and orchestration library. Think [pi](https://github.com/ma
 
 ## Goals
 
-- **Library-first** — `pingspace` is a Rust crate you embed. The CLI/TUI is a thin consumer.
+- **Library-first** — `subspace` is a Rust crate you embed. The CLI/TUI is a thin consumer.
 - **Agent loop** — LLM ↔ tool execution loop with streaming events.
 - **Multi-agent orchestration** — A supervisor can spawn, coordinate, and manage multiple agents.
 - **Provider-agnostic** — Trait-based provider system (Anthropic implemented, others can slot in).
@@ -34,8 +34,8 @@ This is a Cargo workspace with two crates:
 
 | Crate | Description |
 |-------|-------------|
-| [`pingspace`](crates/pingspace/) | Core library — types, provider trait, tools, agent loop |
-| [`pingspace-tui`](crates/pingspace-tui/) | CLI/TUI binary — interactive terminal interface |
+| [`subspace`](crates/subspace/) | Core library — types, provider trait, tools, agent loop |
+| [`subspace-tui`](crates/subspace-tui/) | CLI/TUI binary — interactive terminal interface |
 
 ## Getting Started
 
@@ -48,8 +48,8 @@ This is a Cargo workspace with two crates:
 
 ```bash
 # Clone the repo
-git clone https://github.com/a5huynh/pingspace.git
-cd pingspace
+git clone https://github.com/a5huynh/subspace.git
+cd subspace
 
 # Set your API key
 export ANTHROPIC_API_KEY="sk-ant-..."
@@ -60,16 +60,16 @@ echo 'ANTHROPIC_API_KEY=sk-ant-...' > .env
 cargo build --release
 
 # Run interactive TUI
-cargo run -p pingspace-tui
+cargo run -p subspace-tui
 
 # Single-shot print mode
-cargo run -p pingspace-tui -- -p "Explain this project"
+cargo run -p subspace-tui -- -p "Explain this project"
 ```
 
 ### CLI Options
 
 ```
-pingspace [OPTIONS] [MESSAGE...]
+subspace [OPTIONS] [MESSAGE...]
 
 Arguments:
   [MESSAGE...]  Initial message to send
@@ -87,7 +87,7 @@ Options:
 The core library can be embedded in any Rust application:
 
 ```rust
-use pingspace::prelude::*;
+use subspace::prelude::*;
 use std::sync::Arc;
 
 #[tokio::main]

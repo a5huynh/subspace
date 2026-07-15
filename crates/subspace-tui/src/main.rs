@@ -6,13 +6,13 @@ use std::sync::Arc;
 use clap::Parser;
 use dotenv::dotenv;
 
-use pingspace::agent::{Agent, AgentConfig, AgentEvent};
-use pingspace::provider::anthropic::AnthropicProvider;
-use pingspace::tools::ToolRegistry;
-use pingspace::types::ThinkingLevel;
+use subspace::agent::{Agent, AgentConfig, AgentEvent};
+use subspace::provider::anthropic::AnthropicProvider;
+use subspace::tools::ToolRegistry;
+use subspace::types::ThinkingLevel;
 
 #[derive(Parser)]
-#[command(name = "pingspace", version, about = "A Rust agent harness")]
+#[command(name = "subspace", version, about = "A Rust agent harness")]
 struct Cli {
     /// Initial message to send
     #[arg(trailing_var_arg = true)]
@@ -50,7 +50,7 @@ async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
 
     // Build provider
-    let provider: Arc<dyn pingspace::provider::Provider> =
+    let provider: Arc<dyn subspace::provider::Provider> =
         Arc::new(AnthropicProvider::new(cli.anthropic_api_key));
 
     let thinking = match cli.thinking.as_str() {
@@ -77,7 +77,7 @@ async fn main() -> anyhow::Result<()> {
     }
 
     // Load context files (AGENTS.md / CLAUDE.md) and append to system prompt
-    let context_files = pingspace::context::load_context_files(&cwd);
+    let context_files = subspace::context::load_context_files(&cwd);
     if !context_files.is_empty() {
         eprintln!(
             "Loaded context from: {}",
@@ -87,7 +87,7 @@ async fn main() -> anyhow::Result<()> {
                 .collect::<Vec<_>>()
                 .join(", ")
         );
-        if let Some(ctx) = pingspace::context::format_context(&context_files) {
+        if let Some(ctx) = subspace::context::format_context(&context_files) {
             config.system_prompt.push_str("\n\n");
             config.system_prompt.push_str(&ctx);
         }
@@ -99,7 +99,7 @@ async fn main() -> anyhow::Result<()> {
         // Print mode
         let message = cli.message.join(" ");
         if message.is_empty() {
-            eprintln!("Print mode requires a message. Use: pingspace -p \"your prompt\"");
+            eprintln!("Print mode requires a message. Use: subspace -p \"your prompt\"");
             std::process::exit(1);
         }
         run_print_mode(&agent, &message).await

@@ -1,9 +1,9 @@
 use std::sync::Arc;
 
-use pingspace::agent::{Agent, AgentConfig, AgentEvent};
-use pingspace::provider::mock::{MockProvider, MockResponse};
-use pingspace::tools::ToolRegistry;
-use pingspace::types::*;
+use subspace::agent::{Agent, AgentConfig, AgentEvent};
+use subspace::provider::mock::{MockProvider, MockResponse};
+use subspace::tools::ToolRegistry;
+use subspace::types::*;
 
 #[tokio::test]
 async fn test_agent_simple_text_response() {
@@ -55,7 +55,7 @@ async fn test_agent_tool_call_loop() {
         MockResponse::text("The command output was: hello"),
     ]));
 
-    let dir = std::env::temp_dir().join("pingspace_test_agent_tool");
+    let dir = std::env::temp_dir().join("subspace_test_agent_tool");
     std::fs::create_dir_all(&dir).unwrap();
     let tools = ToolRegistry::coding_defaults(dir.clone());
 
@@ -147,7 +147,7 @@ async fn test_agent_max_turns() {
         .collect();
 
     let provider = Arc::new(MockProvider::new(responses));
-    let dir = std::env::temp_dir().join("pingspace_test_max_turns");
+    let dir = std::env::temp_dir().join("subspace_test_max_turns");
     std::fs::create_dir_all(&dir).unwrap();
     let tools = ToolRegistry::coding_defaults(dir.clone());
 

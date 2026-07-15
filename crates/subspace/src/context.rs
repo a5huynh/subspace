@@ -89,7 +89,7 @@ mod tests {
 
     #[test]
     fn test_find_context_file_agents_md() {
-        let dir = std::env::temp_dir().join("pingspace_ctx_test_1");
+        let dir = std::env::temp_dir().join("subspace_ctx_test_1");
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
         fs::write(dir.join("AGENTS.md"), "# Project rules\nBe concise.").unwrap();
@@ -103,7 +103,7 @@ mod tests {
 
     #[test]
     fn test_find_context_file_claude_md_fallback() {
-        let dir = std::env::temp_dir().join("pingspace_ctx_test_2");
+        let dir = std::env::temp_dir().join("subspace_ctx_test_2");
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
         fs::write(dir.join("CLAUDE.md"), "# Claude rules").unwrap();
@@ -117,7 +117,7 @@ mod tests {
 
     #[test]
     fn test_agents_md_takes_priority_over_claude_md() {
-        let dir = std::env::temp_dir().join("pingspace_ctx_test_3");
+        let dir = std::env::temp_dir().join("subspace_ctx_test_3");
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
         fs::write(dir.join("AGENTS.md"), "agents content").unwrap();
@@ -131,7 +131,7 @@ mod tests {
 
     #[test]
     fn test_no_context_file() {
-        let dir = std::env::temp_dir().join("pingspace_ctx_test_4");
+        let dir = std::env::temp_dir().join("subspace_ctx_test_4");
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
 
@@ -142,7 +142,7 @@ mod tests {
 
     #[test]
     fn test_load_walks_ancestors() {
-        let base = std::env::temp_dir().join("pingspace_ctx_test_5");
+        let base = std::env::temp_dir().join("subspace_ctx_test_5");
         let child = base.join("sub").join("deep");
         let _ = fs::remove_dir_all(&base);
         fs::create_dir_all(&child).unwrap();

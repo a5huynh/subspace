@@ -1,4 +1,4 @@
-use pingspace::types::*;
+use subspace::types::*;
 
 #[test]
 fn test_message_user() {
