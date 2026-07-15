@@ -353,7 +353,7 @@ struct AgentConfig {
 
 impl Default for AgentConfig {
     // system_prompt: pi-style default prompt
-    // model: "claude-sonnet-4-20250514"
+    // model: "claude-opus-4-8"
     // thinking: ThinkingLevel::Low
     // max_tokens: 16384
     // max_turns: 50

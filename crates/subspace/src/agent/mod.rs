@@ -43,7 +43,7 @@ impl Default for AgentConfig {
     fn default() -> Self {
         Self {
             system_prompt: DEFAULT_SYSTEM_PROMPT.to_string(),
-            model: "claude-sonnet-4-20250514".to_string(),
+            model: "claude-opus-4-8".to_string(),
             thinking: ThinkingLevel::Low,
             max_tokens: 16_384,
             max_turns: 50,

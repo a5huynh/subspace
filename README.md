@@ -76,7 +76,7 @@ Arguments:
 
 Options:
   -p, --print              Print mode: send prompt, print response, exit
-      --model <MODEL>      Model ID [default: claude-sonnet-4-6]
+      --model <MODEL>      Model ID [default: claude-opus-4-8]
       --thinking <LEVEL>   Thinking level: off, low, medium, high
   -h, --help               Print help
   -V, --version            Print version

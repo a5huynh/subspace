@@ -23,7 +23,7 @@ struct Cli {
     print: bool,
 
     /// Model ID
-    #[arg(long, default_value = "claude-sonnet-4-6")]
+    #[arg(long, default_value = "claude-opus-4-8")]
     model: String,
 
     /// API key (overrides ANTHROPIC_API_KEY env var)
