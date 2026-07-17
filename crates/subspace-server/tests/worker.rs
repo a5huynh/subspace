@@ -12,7 +12,10 @@ async fn worker_handles_user_prompt() {
     let manager = WorkerManager::new(provider);
     let mut events = manager.subscribe();
 
-    let id = manager.spawn(WorkerConfig::new("Secretary", "You are a helpful secretary."));
+    let id = manager
+        .spawn(WorkerConfig::new("Secretary", "You are a helpful secretary."))
+        .await
+        .unwrap();
     manager.prompt(&id, "hello").await.unwrap();
 
     let mut saw_running = false;
@@ -47,7 +50,10 @@ async fn manager_tracks_and_shuts_down_workers() {
     let provider: Arc<dyn Provider> = Arc::new(MockProvider::with_text("ok"));
     let manager = WorkerManager::new(provider);
 
-    let id = manager.spawn(WorkerConfig::new("Worker A", "role"));
+    let id = manager
+        .spawn(WorkerConfig::new("Worker A", "role"))
+        .await
+        .unwrap();
     assert_eq!(manager.list().len(), 1);
     assert_eq!(manager.status(&id), Some(WorkerStatus::Idle));
 

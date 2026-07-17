@@ -1,15 +1,16 @@
 //! Worker configuration, status, stimuli, and the per-worker runtime loop.
 
-use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 
 use chrono::Utc;
-use subspace::agent::Agent;
-use subspace::types::{ThinkingLevel, new_id};
+use subspace::agent::{Agent, AgentEvent};
+use subspace::types::{Message, ThinkingLevel, new_id};
 use tokio::sync::{broadcast, mpsc};
 
 use crate::WorkerId;
 use crate::event::{ServerEvent, WorkerEvent};
+use crate::store::SqliteStore;
 
 /// Static configuration for a worker.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -60,8 +61,9 @@ pub(crate) async fn run_worker(
     agent: Agent,
     mut mailbox: mpsc::Receiver<Stimulus>,
     events: broadcast::Sender<ServerEvent>,
-    status: std::sync::Arc<Mutex<WorkerStatus>>,
-    seq: std::sync::Arc<AtomicU64>,
+    status: Arc<Mutex<WorkerStatus>>,
+    seq: Arc<AtomicU64>,
+    store: Option<Arc<SqliteStore>>,
 ) {
     while let Some(stimulus) = mailbox.recv().await {
         match stimulus {
@@ -81,9 +83,23 @@ pub(crate) async fn run_worker(
                     WorkerEvent::StimulusReceived(format!("user prompt ({} chars)", text.len())),
                 );
 
-                // Drive the engine agent loop and forward every event.
+                // Persist the user turn before running.
+                if let Some(store) = &store
+                    && let Err(e) = store.append_messages(&id, &[Message::user(&text)]).await
+                {
+                    tracing::warn!("failed to persist user message: {e}");
+                }
+
+                // Drive the engine agent loop, forwarding events and persisting
+                // the produced messages when the run completes.
                 let (mut rx, handle) = agent.prompt(&text).await;
                 while let Some(ev) = rx.recv().await {
+                    if let AgentEvent::AgentEnd { messages, .. } = &ev
+                        && let Some(store) = &store
+                        && let Err(e) = store.append_messages(&id, messages).await
+                    {
+                        tracing::warn!("failed to persist agent messages: {e}");
+                    }
                     emit(&events, &id, &seq, WorkerEvent::Agent(ev));
                 }
                 let _ = handle.await;
