@@ -1,0 +1,22 @@
+[package]
+name = "subspace-server"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+subspace = { path = "../subspace" }
+
+# Async runtime
+tokio = { version = "1", features = ["full"] }
+
+# Error handling
+anyhow = "1"
+
+# Serialization (worker config persistence, later)
+serde = { version = "1", features = ["derive"] }
+
+# Timestamps
+chrono = { version = "0.4", features = ["serde"] }
+
+# Logging
+tracing = "0.1"
