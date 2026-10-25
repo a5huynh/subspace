@@ -733,11 +733,12 @@ incoming email *and* answers questions about it. `E` and `F` enrich from there.
 
 | Crate / Package | Purpose | Status |
 |-----------------|---------|--------|
-| `axum` (+ `tower`, `tower-http`) | HTTP + WebSocket server | pending approval |
-| `sqlx` (sqlite) *or* `rusqlite` | SQLite persistence + FTS5 | pending approval — pick one |
+| `axum` (+ `tower`, `tower-http`) | HTTP + WebSocket server | **approved** (`axum`; `tower`/`tower-http` only if needed) |
+| `sqlx` (sqlite) | SQLite persistence + FTS5 | **in use** (chosen in A3) |
+| ~~`rusqlite`~~ | alternative to `sqlx` | not chosen |
 | AEAD crate (e.g. `chacha20poly1305`) | encrypt credentials at rest | pending approval |
 | `tokio-cron-scheduler` or similar | pollers / scheduled triggers | pending approval |
-| React + Vite + TypeScript | web console | pending approval (separate `console/` package) |
+| React + Vite + TypeScript | web console | **approved** (separate `console/` package) |
 | `toml` | parse/write `worker.toml` | **approved** |
 
 Already in the workspace and reused: `tokio`, `reqwest`, `serde`/`serde_json`, `clap`,

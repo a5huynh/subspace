@@ -1,20 +1,23 @@
-//! The Worker Manager: lifecycle for all workers (spawn, deliver, list, shutdown).
+//! The Worker Manager: lifecycle for all workers (spawn, deliver, list,
+//! update, shutdown) plus access to their history and event streams.
 
 use std::collections::{HashMap, HashSet};
+use std::fmt;
 use std::path::Path;
-use std::sync::atomic::AtomicU64;
 use std::sync::{Arc, Mutex};
 
 use anyhow::{Result, anyhow};
+use serde::Serialize;
 use subspace::agent::{Agent, AgentConfig};
 use subspace::provider::Provider;
 use subspace::tools::ToolRegistry;
-use subspace::types::Message;
+use subspace::types::{Message, new_id};
 use tokio::sync::{broadcast, mpsc};
 use tokio::task::JoinHandle;
+use ts_rs::TS;
 
 use crate::WorkerId;
-use crate::event::ServerEvent;
+use crate::event::{EventLog, Replay, ServerEvent};
 use crate::home::Homes;
 use crate::home_tools::{HomeScope, home_tools};
 use crate::skills::{self, Skill, SkillSource};
@@ -24,10 +27,33 @@ use crate::worker::{Stimulus, WorkerConfig, WorkerStatus, run_worker};
 const EVENT_BUS_CAPACITY: usize = 1024;
 const MAILBOX_CAPACITY: usize = 64;
 
+/// Errors callers may want to tell apart (e.g. to map onto HTTP statuses).
+/// Returned wrapped in [`anyhow::Error`]; use `downcast_ref` to inspect.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ManagerError {
+    NotFound(WorkerId),
+    AlreadyExists(WorkerId),
+    /// The worker is mid-run; retry once it is idle.
+    Busy(WorkerId),
+}
+
+impl fmt::Display for ManagerError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::NotFound(id) => write!(f, "no such worker: {id}"),
+            Self::AlreadyExists(id) => write!(f, "worker '{id}' already exists"),
+            Self::Busy(id) => write!(f, "worker '{id}' is busy; try again when it is idle"),
+        }
+    }
+}
+
+impl std::error::Error for ManagerError {}
+
 struct WorkerHandle {
     config: WorkerConfig,
     tx: mpsc::Sender<Stimulus>,
     status: Arc<Mutex<WorkerStatus>>,
+    log: Arc<EventLog>,
     task: JoinHandle<()>,
 }
 
@@ -38,11 +64,25 @@ struct Persistence {
 }
 
 /// A lightweight view of a worker for listing.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, TS)]
 pub struct WorkerSummary {
     pub id: WorkerId,
     pub name: String,
+    pub description: String,
     pub status: WorkerStatus,
+}
+
+/// A worker's persisted messages plus the stream position to resume from.
+#[derive(Debug, Clone, Serialize, TS)]
+pub struct History {
+    /// The manager's boot epoch; a stream resumed with a different epoch
+    /// must resync.
+    pub epoch: String,
+    /// Resume the event stream with `since = cursor`. Taken *before* reading
+    /// messages, so replayed events may repeat messages already listed here;
+    /// clients merge by message id.
+    pub cursor: u64,
+    pub messages: Vec<Message>,
 }
 
 /// Owns and supervises the lifecycle of all workers.
@@ -51,6 +91,8 @@ pub struct WorkerManager {
     events: broadcast::Sender<ServerEvent>,
     workers: Mutex<HashMap<WorkerId, WorkerHandle>>,
     persistence: Option<Persistence>,
+    /// Random per-process id; event `seq`s are only comparable within one.
+    epoch: String,
 }
 
 impl WorkerManager {
@@ -76,12 +118,29 @@ impl WorkerManager {
             events,
             workers: Mutex::new(HashMap::new()),
             persistence,
+            epoch: new_id(),
         }
+    }
+
+    /// This process's epoch (see [`History::epoch`]).
+    pub fn epoch(&self) -> &str {
+        &self.epoch
     }
 
     /// Subscribe to the live event stream across all workers.
     pub fn subscribe(&self) -> broadcast::Receiver<ServerEvent> {
         self.events.subscribe()
+    }
+
+    /// Subscribe to one worker's events after `since`: a replay of buffered
+    /// events (or a [`Replay::Gap`]) plus a live receiver. The receiver
+    /// carries all workers' events; filter by `worker_id`.
+    pub fn subscribe_worker(
+        &self,
+        id: &str,
+        since: u64,
+    ) -> Result<(Replay, broadcast::Receiver<ServerEvent>)> {
+        Ok(self.log(id)?.subscribe(since))
     }
 
     /// Rebuild the index from homes and start every worker found there.
@@ -128,7 +187,7 @@ impl WorkerManager {
             }
             p.store.upsert_index(&cfg, &p.homes.path(&cfg.id)?).await?;
             let history = p.store.load_history(&cfg.id).await?;
-            self.start(cfg, history).await?;
+            self.start(cfg, history, None).await?;
             started += 1;
         }
         Ok(started)
@@ -137,8 +196,13 @@ impl WorkerManager {
     /// Create and start a new worker. With persistence, its home is created
     /// first and then indexed.
     pub async fn spawn(&self, config: WorkerConfig) -> Result<WorkerId> {
-        if self.workers.lock().unwrap().contains_key(&config.id) {
-            return Err(anyhow!("worker '{}' is already running", config.id));
+        let exists = self.workers.lock().unwrap().contains_key(&config.id)
+            || match &self.persistence {
+                Some(p) => p.homes.exists(&config.id)?,
+                None => false,
+            };
+        if exists {
+            return Err(ManagerError::AlreadyExists(config.id).into());
         }
         if let Some(p) = &self.persistence {
             let home = p.homes.create(&config)?;
@@ -147,11 +211,17 @@ impl WorkerManager {
                 return Err(e);
             }
         }
-        self.start(config, Vec::new()).await
+        self.start(config, Vec::new(), None).await
     }
 
-    /// Build the engine agent and register the worker's runtime loop.
-    async fn start(&self, config: WorkerConfig, history: Vec<Message>) -> Result<WorkerId> {
+    /// Build the engine agent and register the worker's runtime loop. Pass the
+    /// worker's previous `log` when restarting so `seq` keeps increasing.
+    async fn start(
+        &self,
+        config: WorkerConfig,
+        history: Vec<Message>,
+        log: Option<Arc<EventLog>>,
+    ) -> Result<WorkerId> {
         let id = config.id.clone();
 
         let (system_prompt, tools) = self.prepare(&config);
@@ -170,21 +240,20 @@ impl WorkerManager {
         // an orphaned task running.
         let mut workers = self.workers.lock().unwrap();
         if workers.contains_key(&id) {
-            return Err(anyhow!("worker '{id}' is already running"));
+            return Err(ManagerError::AlreadyExists(id).into());
         }
 
         let (tx, mailbox) = mpsc::channel(MAILBOX_CAPACITY);
         let status = Arc::new(Mutex::new(WorkerStatus::Idle));
-        let seq = Arc::new(AtomicU64::new(0));
+        let log = log.unwrap_or_else(|| Arc::new(EventLog::new(id.clone(), self.events.clone())));
 
         let task = tokio::spawn(run_worker(
-            id.clone(),
             agent,
             mailbox,
-            self.events.clone(),
+            log.clone(),
             status.clone(),
-            seq,
             self.persistence.as_ref().map(|p| p.store.clone()),
+            id.clone(),
         ));
 
         workers.insert(
@@ -193,6 +262,7 @@ impl WorkerManager {
                 config,
                 tx,
                 status,
+                log,
                 task,
             },
         );
@@ -233,6 +303,14 @@ impl WorkerManager {
         (skills::compose_system_prompt(&config.role, &skills), tools)
     }
 
+    fn log(&self, id: &str) -> Result<Arc<EventLog>> {
+        let workers = self.workers.lock().unwrap();
+        workers
+            .get(id)
+            .map(|h| h.log.clone())
+            .ok_or_else(|| ManagerError::NotFound(id.to_string()).into())
+    }
+
     /// Deliver a stimulus to a worker's mailbox.
     pub async fn deliver(&self, id: &str, stimulus: Stimulus) -> Result<()> {
         // Clone the sender out of the lock so we don't hold the guard across await.
@@ -245,7 +323,7 @@ impl WorkerManager {
                 .send(stimulus)
                 .await
                 .map_err(|_| anyhow!("worker '{id}' mailbox is closed")),
-            None => Err(anyhow!("no such worker: {id}")),
+            None => Err(ManagerError::NotFound(id.to_string()).into()),
         }
     }
 
@@ -261,29 +339,87 @@ impl WorkerManager {
         workers.get(id).map(|h| h.status.lock().unwrap().clone())
     }
 
-    /// List all in-memory (running) workers.
+    /// A running worker's current config.
+    pub fn get(&self, id: &str) -> Option<WorkerConfig> {
+        let workers = self.workers.lock().unwrap();
+        workers.get(id).map(|h| h.config.clone())
+    }
+
+    /// List all in-memory (running) workers, sorted by name.
     pub fn list(&self) -> Vec<WorkerSummary> {
         let workers = self.workers.lock().unwrap();
-        workers
+        let mut out: Vec<_> = workers
             .values()
             .map(|h| WorkerSummary {
                 id: h.config.id.clone(),
                 name: h.config.name.clone(),
+                description: h.config.description.clone(),
                 status: h.status.lock().unwrap().clone(),
             })
-            .collect()
+            .collect();
+        out.sort_by(|a, b| a.name.cmp(&b.name).then_with(|| a.id.cmp(&b.id)));
+        out
+    }
+
+    /// A worker's persisted messages and the cursor to resume its stream from.
+    /// In-memory workers have no persisted messages.
+    pub async fn history(&self, id: &str) -> Result<History> {
+        // Cursor first: anything that lands in between is replayed (and
+        // deduplicated by id) rather than lost.
+        let cursor = self.log(id)?.cursor();
+        let messages = match &self.persistence {
+            Some(p) => p.store.load_history(id).await?,
+            None => Vec::new(),
+        };
+        Ok(History {
+            epoch: self.epoch.clone(),
+            cursor,
+            messages,
+        })
+    }
+
+    /// Replace an idle worker's config: save it to the home, refresh the
+    /// index, and restart the worker (keeping history and its event log) so
+    /// the change applies to its next session. The id cannot change.
+    pub async fn update(&self, config: WorkerConfig) -> Result<()> {
+        let id = config.id.clone();
+        match self.status(&id) {
+            None => return Err(ManagerError::NotFound(id).into()),
+            Some(WorkerStatus::Running) => return Err(ManagerError::Busy(id).into()),
+            Some(_) => {}
+        }
+        if let Some(p) = &self.persistence {
+            p.homes.save(&config)?;
+            p.store.upsert_index(&config, &p.homes.path(&id)?).await?;
+        }
+        let log = self.stop(&id).await?;
+        let history = match &self.persistence {
+            Some(p) => p.store.load_history(&id).await?,
+            None => Vec::new(),
+        };
+        self.start(config, history, Some(log)).await?;
+        Ok(())
+    }
+
+    /// Stop a worker's task and remove it from the in-memory set, returning
+    /// its event log. Queued stimuli are processed before it stops.
+    async fn stop(&self, id: &str) -> Result<Arc<EventLog>> {
+        self.deliver(id, Stimulus::Shutdown).await?;
+        let handle = self
+            .workers
+            .lock()
+            .unwrap()
+            .remove(id)
+            .ok_or_else(|| ManagerError::NotFound(id.to_string()))?;
+        let _ = handle.task.await;
+        Ok(handle.log)
     }
 
     /// Stop a worker's task and remove it from the in-memory set.
     ///
     /// The worker remains persisted and can be restored via [`Self::boot`].
     pub async fn shutdown(&self, id: &str) -> Result<()> {
-        self.deliver(id, Stimulus::Shutdown).await?;
-        let handle = self.workers.lock().unwrap().remove(id);
-        if let Some(h) = handle {
-            let _ = h.task.await;
-        }
-        Ok(())
+        self.stop(id).await.map(|_| ())
     }
 
     /// Permanently delete a worker: stop it, drop its index entry and history,
@@ -296,7 +432,7 @@ impl WorkerManager {
             None => false,
         };
         if !running && !has_home {
-            return Err(anyhow!("no such worker: {id}"));
+            return Err(ManagerError::NotFound(id.to_string()).into());
         }
 
         if running {

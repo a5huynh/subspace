@@ -10,7 +10,7 @@ use std::time::Duration;
 use subspace::agent::AgentEvent;
 use subspace::provider::mock::{MockProvider, MockResponse};
 use subspace::provider::{CompletionRequest, CompletionStream, Provider};
-use subspace_server::{WorkerEvent, WorkerManager};
+use subspace_server::{WorkerEvent, WorkerManager, WorkerStatus};
 
 /// Records every completion request, then delegates to a [`MockProvider`].
 pub struct CapturingProvider {
@@ -55,17 +55,24 @@ impl Provider for CapturingProvider {
     }
 }
 
-/// Prompt a worker and wait for its run to finish.
+/// Prompt a worker and wait for its run to finish: the run's `AgentEnd`
+/// followed by the worker returning to idle (after history is persisted).
 pub async fn prompt_and_wait(manager: &WorkerManager, id: &str, text: &str) {
     let mut events = manager.subscribe();
     manager.prompt(id, text).await.unwrap();
     tokio::time::timeout(Duration::from_secs(5), async {
+        let mut ended = false;
         while let Ok(ev) = events.recv().await {
-            if matches!(ev.inner, WorkerEvent::Agent(AgentEvent::AgentEnd { .. })) {
-                break;
+            if ev.worker_id != id {
+                continue;
+            }
+            match ev.inner {
+                WorkerEvent::Agent(AgentEvent::AgentEnd { .. }) => ended = true,
+                WorkerEvent::StatusChanged(WorkerStatus::Idle) if ended => break,
+                _ => {}
             }
         }
     })
     .await
-    .expect("timed out waiting for AgentEnd");
+    .expect("timed out waiting for the run to finish");
 }

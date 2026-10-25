@@ -38,3 +38,9 @@ dirs = "6"
 
 # Logging
 tracing = "0.1"
+
+# TypeScript bindings for wire types (enabled by the server)
+ts-rs = { version = "12", optional = true, features = ["chrono-impl", "serde-json-impl"] }
+
+[features]
+ts = ["dep:ts-rs"]

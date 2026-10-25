@@ -27,7 +27,8 @@ pub struct ToolDefinition {
 // Tool result
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct ToolResult {
     pub content: Vec<ContentBlock>,
     pub is_error: bool,

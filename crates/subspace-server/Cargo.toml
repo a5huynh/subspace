@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-subspace = { path = "../subspace" }
+subspace = { path = "../subspace", features = ["ts"] }
 
 # Async runtime
 tokio = { version = "1", features = ["full"] }
@@ -16,6 +16,9 @@ anyhow = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 toml = "1"
+
+# TypeScript bindings for the console (generated from wire types)
+ts-rs = { version = "12", features = ["chrono-impl", "serde-json-impl"] }
 
 # Timestamps
 chrono = { version = "0.4", features = ["serde"] }

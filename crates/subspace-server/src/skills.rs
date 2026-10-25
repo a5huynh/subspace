@@ -17,7 +17,7 @@ pub const SKILL_FILE: &str = "SKILL.md";
 
 /// Per-worker skill settings, stored under `[skills]` in `worker.toml`.
 /// Every discovered skill is enabled unless listed in `disabled`.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]
 pub struct SkillSelection {
     #[serde(default)]
     pub disabled: Vec<String>,

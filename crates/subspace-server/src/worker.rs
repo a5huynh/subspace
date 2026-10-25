@@ -1,20 +1,20 @@
 //! Worker configuration, status, stimuli, and the per-worker runtime loop.
 
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
-use chrono::Utc;
+use serde::{Deserialize, Serialize};
 use subspace::agent::{Agent, AgentEvent};
 use subspace::types::{Message, ThinkingLevel, new_id};
-use tokio::sync::{broadcast, mpsc};
+use tokio::sync::mpsc;
+use ts_rs::TS;
 
 use crate::WorkerId;
-use crate::event::{ServerEvent, WorkerEvent};
+use crate::event::{EventLog, WorkerEvent};
 use crate::skills::SkillSelection;
 use crate::store::SqliteStore;
 
 /// Static configuration for a worker.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
 pub struct WorkerConfig {
     pub id: WorkerId,
     pub name: String,
@@ -45,8 +45,10 @@ impl WorkerConfig {
     }
 }
 
-/// Runtime status of a worker.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// Runtime status of a worker. Serialized as `{"state": "idle"}` or
+/// `{"state": "error", "message": "..."}`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, TS)]
+#[serde(tag = "state", content = "message", rename_all = "snake_case")]
 pub enum WorkerStatus {
     Idle,
     Running,
@@ -66,38 +68,34 @@ pub enum Stimulus {
 /// The per-worker runtime loop. Consumes stimuli from the mailbox until it is
 /// closed or a [`Stimulus::Shutdown`] arrives.
 pub(crate) async fn run_worker(
-    id: WorkerId,
     agent: Agent,
     mut mailbox: mpsc::Receiver<Stimulus>,
-    events: broadcast::Sender<ServerEvent>,
+    log: Arc<EventLog>,
     status: Arc<Mutex<WorkerStatus>>,
-    seq: Arc<AtomicU64>,
     store: Option<Arc<SqliteStore>>,
+    id: WorkerId,
 ) {
     while let Some(stimulus) = mailbox.recv().await {
         match stimulus {
             Stimulus::Shutdown => break,
             Stimulus::UserPrompt { text } => {
-                set_status(&status, WorkerStatus::Running);
-                emit(
-                    &events,
-                    &id,
-                    &seq,
-                    WorkerEvent::StatusChanged(WorkerStatus::Running),
-                );
-                emit(
-                    &events,
-                    &id,
-                    &seq,
-                    WorkerEvent::StimulusReceived(format!("user prompt ({} chars)", text.len())),
-                );
+                set_status(&status, &log, WorkerStatus::Running);
+                log.emit(WorkerEvent::StimulusReceived(format!(
+                    "user prompt ({} chars)",
+                    text.len()
+                )));
 
-                // Persist the user turn before running.
+                // Persist the user turn before running, then publish it with
+                // its stable id so clients can merge it with fetched history.
+                let user = Message::user(&text);
                 if let Some(store) = &store
-                    && let Err(e) = store.append_messages(&id, &[Message::user(&text)]).await
+                    && let Err(e) = store
+                        .append_messages(&id, std::slice::from_ref(&user))
+                        .await
                 {
                     tracing::warn!("failed to persist user message: {e}");
                 }
+                log.emit(WorkerEvent::UserMessage(user));
 
                 // Drive the engine agent loop, forwarding events and persisting
                 // the produced messages when the run completes.
@@ -109,38 +107,17 @@ pub(crate) async fn run_worker(
                     {
                         tracing::warn!("failed to persist agent messages: {e}");
                     }
-                    emit(&events, &id, &seq, WorkerEvent::Agent(ev));
+                    log.emit(WorkerEvent::Agent(ev));
                 }
                 let _ = handle.await;
 
-                set_status(&status, WorkerStatus::Idle);
-                emit(
-                    &events,
-                    &id,
-                    &seq,
-                    WorkerEvent::StatusChanged(WorkerStatus::Idle),
-                );
+                set_status(&status, &log, WorkerStatus::Idle);
             }
         }
     }
 }
 
-fn set_status(status: &Mutex<WorkerStatus>, next: WorkerStatus) {
-    *status.lock().unwrap() = next;
-}
-
-fn emit(
-    events: &broadcast::Sender<ServerEvent>,
-    id: &WorkerId,
-    seq: &AtomicU64,
-    inner: WorkerEvent,
-) {
-    let ev = ServerEvent {
-        worker_id: id.clone(),
-        seq: seq.fetch_add(1, Ordering::SeqCst),
-        ts: Utc::now(),
-        inner,
-    };
-    // Ignore send errors: it just means no console clients are subscribed.
-    let _ = events.send(ev);
+fn set_status(status: &Mutex<WorkerStatus>, log: &EventLog, next: WorkerStatus) {
+    *status.lock().unwrap() = next.clone();
+    log.emit(WorkerEvent::StatusChanged(next));
 }
