@@ -78,6 +78,12 @@ cargo run -p subspace-server
 cargo run -p subspace-server -- --data-dir ./data --bind 127.0.0.1:8080
 ```
 
+Then start the web console (proxies `/api` to the server):
+
+```bash
+cd console && npm install && npm run dev   # http://localhost:5173
+```
+
 The API has no authentication, so keep it on loopback. Each worker's identity lives in
 `<data-dir>/workers/<id>/` (`worker.toml`, `ROLE.md`, `skills/`, `memory/`); global skills
 go in `<data-dir>/skills/`.
