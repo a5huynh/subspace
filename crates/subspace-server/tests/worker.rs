@@ -13,7 +13,10 @@ async fn worker_handles_user_prompt() {
     let mut events = manager.subscribe();
 
     let id = manager
-        .spawn(WorkerConfig::new("Secretary", "You are a helpful secretary."))
+        .spawn(WorkerConfig::new(
+            "Secretary",
+            "You are a helpful secretary.",
+        ))
         .await
         .unwrap();
     manager.prompt(&id, "hello").await.unwrap();
