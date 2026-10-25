@@ -24,6 +24,31 @@ pub struct WorkerIndexEntry {
     pub created_at: String,
 }
 
+/// An A3-era worker row (config stored in SQLite) awaiting migration to a home.
+#[derive(Debug, Clone)]
+pub struct LegacyWorker {
+    pub id: String,
+    pub name: String,
+    pub role: String,
+    pub model: String,
+    /// JSON-encoded [`subspace::types::ThinkingLevel`], as A3 stored it.
+    pub thinking: String,
+    pub created_at: String,
+}
+
+impl LegacyWorker {
+    pub fn to_config(&self) -> Result<WorkerConfig> {
+        Ok(WorkerConfig {
+            id: self.id.clone(),
+            name: self.name.clone(),
+            description: String::new(),
+            role: self.role.clone(),
+            model: self.model.clone(),
+            thinking: serde_json::from_str(&self.thinking)?,
+        })
+    }
+}
+
 /// SQLite-backed store. Cheap to clone (the pool is reference-counted).
 pub struct SqliteStore {
     pool: SqlitePool,
@@ -93,6 +118,59 @@ impl SqliteStore {
             .bind(id)
             .execute(&self.pool)
             .await?;
+        Ok(())
+    }
+
+    /// A3 worker rows not yet migrated into homes, oldest first.
+    pub async fn list_legacy_workers(&self) -> Result<Vec<LegacyWorker>> {
+        let rows = sqlx::query(
+            "SELECT id, name, role, model, thinking, created_at FROM legacy_workers
+             ORDER BY created_at, id",
+        )
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows
+            .into_iter()
+            .map(|row| LegacyWorker {
+                id: row.get("id"),
+                name: row.get("name"),
+                role: row.get("role"),
+                model: row.get("model"),
+                thinking: row.get("thinking"),
+                created_at: row.get("created_at"),
+            })
+            .collect())
+    }
+
+    /// Finish migrating a legacy worker whose home now exists: index it
+    /// (keeping the original `created_at`) and drop the legacy row, atomically.
+    pub async fn complete_legacy_migration(
+        &self,
+        cfg: &WorkerConfig,
+        home_path: &Path,
+        created_at: &str,
+    ) -> Result<()> {
+        let mut tx = self.pool.begin().await?;
+        sqlx::query(
+            "INSERT INTO workers (id, name, description, home_path, created_at)
+             VALUES (?, ?, ?, ?, ?)
+             ON CONFLICT(id) DO UPDATE SET
+                 name = excluded.name,
+                 description = excluded.description,
+                 home_path = excluded.home_path",
+        )
+        .bind(&cfg.id)
+        .bind(&cfg.name)
+        .bind(&cfg.description)
+        .bind(home_path.to_string_lossy().as_ref())
+        .bind(created_at)
+        .execute(&mut *tx)
+        .await?;
+        sqlx::query("DELETE FROM legacy_workers WHERE id = ?")
+            .bind(&cfg.id)
+            .execute(&mut *tx)
+            .await?;
+        tx.commit().await?;
         Ok(())
     }
 

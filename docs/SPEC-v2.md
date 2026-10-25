@@ -618,7 +618,7 @@ for wiring and state.
 | Table | Key columns |
 |-------|-------------|
 | `workers` | id, name, description, home_path, created_at — **index** rebuilt from homes (status is runtime-only) |
-| `legacy_workers` | A3 rows awaiting migration into homes (Phase A4 step 3) |
+| `legacy_workers` | A3 rows not yet moved into homes; drained on `boot()` (home created first, then index + delete in one transaction). Unconvertible rows are logged and left in place. |
 | `worker_integrations` | worker_id, integration, credential_ref |
 | `subscriptions` | id, worker_id, integration, event_kind, filter(json) |
 | `messages` | id, worker_id, role, content(json), ts — conversation history |

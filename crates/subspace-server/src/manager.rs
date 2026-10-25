@@ -84,6 +84,7 @@ impl WorkerManager {
     /// Rebuild the index from homes and start every worker found there.
     /// Returns how many workers were started.
     ///
+    /// A3-era workers still stored in SQLite are migrated into homes first.
     /// Broken homes are logged and skipped. Index entries whose home is gone
     /// are dropped (their history is kept). Already-running workers are left
     /// alone, so calling this twice is harmless.
@@ -91,6 +92,8 @@ impl WorkerManager {
         let Some(p) = &self.persistence else {
             return Ok(0);
         };
+
+        migrate_legacy_workers(p).await?;
 
         let listing = p.homes.list()?;
         for (id, err) in &listing.invalid {
@@ -268,4 +271,52 @@ impl WorkerManager {
         }
         Ok(())
     }
+}
+
+/// Move A3-era workers (config in SQLite) into homes. Returns how many moved.
+///
+/// The home is created before the DB is touched, and the DB side is one
+/// transaction, so a crash at any point is recovered by the next boot: an
+/// existing home is kept as the source of truth and only the DB is finalized.
+/// Rows that can't be converted are logged and left in place.
+async fn migrate_legacy_workers(p: &Persistence) -> Result<usize> {
+    let mut migrated = 0;
+    for legacy in p.store.list_legacy_workers().await? {
+        let home = match p.homes.path(&legacy.id) {
+            Ok(path) => path,
+            Err(e) => {
+                tracing::warn!("not migrating legacy worker: {e:#}");
+                continue;
+            }
+        };
+        // An existing home means a previous migration didn't finish its DB step;
+        // the home wins over the legacy row.
+        let home_exists = p.homes.exists(&legacy.id)?;
+        let from_home = if home_exists {
+            p.homes.load(&legacy.id).ok()
+        } else {
+            None
+        };
+        let cfg = match from_home.map_or_else(|| legacy.to_config(), Ok) {
+            Ok(cfg) => cfg,
+            Err(e) => {
+                tracing::warn!("not migrating legacy worker '{}': {e:#}", legacy.id);
+                continue;
+            }
+        };
+        if !home_exists {
+            p.homes.create(&cfg)?;
+        }
+        p.store
+            .complete_legacy_migration(&cfg, &home, &legacy.created_at)
+            .await?;
+        tracing::info!(
+            "migrated worker '{}' ({}) into {}",
+            cfg.id,
+            cfg.name,
+            home.display()
+        );
+        migrated += 1;
+    }
+    Ok(migrated)
 }
