@@ -11,6 +11,7 @@ use std::path::Path;
 use anyhow::Result;
 use ts_rs::{Config, TS};
 
+use crate::api::{CreateWorker, ErrorBody, Health, PromptRequest, UpdateWorker, WorkerDetail};
 use crate::event::ServerEvent;
 use crate::manager::{History, WorkerSummary};
 use crate::worker::WorkerConfig;
@@ -26,5 +27,11 @@ pub fn export_ts_bindings(dir: &Path) -> Result<()> {
     WorkerSummary::export_all(&cfg)?;
     WorkerConfig::export_all(&cfg)?;
     History::export_all(&cfg)?;
+    WorkerDetail::export_all(&cfg)?;
+    CreateWorker::export_all(&cfg)?;
+    UpdateWorker::export_all(&cfg)?;
+    PromptRequest::export_all(&cfg)?;
+    Health::export_all(&cfg)?;
+    ErrorBody::export_all(&cfg)?;
     Ok(())
 }

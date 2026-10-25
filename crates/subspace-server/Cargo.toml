@@ -23,8 +23,16 @@ ts-rs = { version = "12", features = ["chrono-impl", "serde-json-impl"] }
 # Timestamps
 chrono = { version = "0.4", features = ["serde"] }
 
+# HTTP + WebSocket API
+axum = { version = "0.8", features = ["ws"] }
+
 # Persistence
 sqlx = { version = "0.8", features = ["runtime-tokio", "sqlite", "migrate"] }
 
 # Logging
 tracing = "0.1"
+
+[dev-dependencies]
+# Black-box API tests against a real server on a random port
+reqwest = { version = "0.12", features = ["json"] }
+tokio-tungstenite = "0.29"  # match axum's, to avoid two copies

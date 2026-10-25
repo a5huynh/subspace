@@ -5,6 +5,7 @@
 //! in SQLite. Events are numbered and buffered per worker ([`event::EventLog`])
 //! and published on a shared broadcast bus.
 
+pub mod api;
 pub mod bindings;
 pub mod event;
 pub mod home;

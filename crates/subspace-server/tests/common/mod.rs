@@ -4,7 +4,7 @@
 
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use subspace::agent::AgentEvent;
@@ -53,6 +53,58 @@ impl Provider for CapturingProvider {
         self.requests.lock().unwrap().push(request.clone());
         self.inner.complete(request)
     }
+}
+
+/// Holds every completion until [`GatedProvider::release`] is called, so a
+/// test can observe a worker mid-run.
+pub struct GatedProvider {
+    inner: MockProvider,
+    gate: tokio::sync::Semaphore,
+}
+
+impl GatedProvider {
+    pub fn with_text(s: &str) -> Self {
+        Self {
+            inner: MockProvider::with_text(s),
+            gate: tokio::sync::Semaphore::new(0),
+        }
+    }
+
+    /// Let one pending (or future) completion proceed.
+    pub fn release(&self) {
+        self.gate.add_permits(1);
+    }
+}
+
+impl Provider for GatedProvider {
+    fn name(&self) -> &str {
+        "gated"
+    }
+
+    fn complete<'a, 'b>(
+        &'a self,
+        request: CompletionRequest,
+    ) -> Pin<Box<dyn Future<Output = anyhow::Result<CompletionStream>> + Send + 'b>>
+    where
+        'a: 'b,
+        Self: 'b,
+    {
+        Box::pin(async move {
+            self.gate.acquire().await.unwrap().forget();
+            self.inner.complete(request).await
+        })
+    }
+}
+
+/// Serve the API for `manager` on a random localhost port; returns the base URL.
+pub async fn spawn_server(manager: Arc<WorkerManager>) -> String {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let app = subspace_server::api::router(manager);
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+    format!("http://{addr}")
 }
 
 /// Prompt a worker and wait for its run to finish: the run's `AgentEnd`
