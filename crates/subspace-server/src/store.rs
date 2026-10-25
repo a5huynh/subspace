@@ -66,6 +66,7 @@ impl SqliteStore {
             out.push(WorkerConfig {
                 id: row.get("id"),
                 name: row.get("name"),
+                description: String::new(),
                 role: row.get("role"),
                 model: row.get("model"),
                 thinking: serde_json::from_str(&thinking_s)?,

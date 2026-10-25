@@ -17,6 +17,9 @@ use crate::store::SqliteStore;
 pub struct WorkerConfig {
     pub id: WorkerId,
     pub name: String,
+    /// One line describing what this worker is good at (used for routing).
+    #[serde(default)]
+    pub description: String,
     /// The worker's role / persona — becomes the agent system prompt.
     pub role: String,
     pub model: String,
@@ -29,6 +32,7 @@ impl WorkerConfig {
         Self {
             id: new_id(),
             name: name.into(),
+            description: String::new(),
             role: role.into(),
             model: subspace::agent::AgentConfig::default().model,
             thinking: ThinkingLevel::Low,
