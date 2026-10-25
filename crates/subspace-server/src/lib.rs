@@ -6,6 +6,7 @@
 
 pub mod event;
 pub mod home;
+pub mod home_tools;
 pub mod manager;
 pub mod skills;
 pub mod store;

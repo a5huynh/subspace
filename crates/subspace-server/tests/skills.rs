@@ -1,13 +1,10 @@
-use std::fs;
-use std::future::Future;
-use std::path::{Path, PathBuf};
-use std::pin::Pin;
-use std::sync::{Arc, Mutex};
-use std::time::Duration;
+mod common;
 
-use subspace::agent::AgentEvent;
-use subspace::provider::mock::MockProvider;
-use subspace::provider::{CompletionRequest, CompletionStream, Provider};
+use std::fs;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+
+use common::{CapturingProvider, prompt_and_wait};
 use subspace::types::new_id;
 use subspace_server::home::{GLOBAL_SKILLS_DIR, Homes};
 use subspace_server::skills::{
@@ -15,7 +12,7 @@ use subspace_server::skills::{
     format_skills, parse_frontmatter,
 };
 use subspace_server::store::SqliteStore;
-use subspace_server::{WorkerConfig, WorkerEvent, WorkerManager};
+use subspace_server::{WorkerConfig, WorkerManager};
 
 fn temp_dir() -> PathBuf {
     let dir = std::env::temp_dir().join(format!("subspace_skills_test_{}", new_id()));
@@ -189,49 +186,6 @@ fn formats_and_escapes_skills_block() {
 
 // --- manager integration ---------------------------------------------------
 
-/// Records the system prompt of every completion request, then delegates.
-struct CapturingProvider {
-    inner: MockProvider,
-    prompts: Mutex<Vec<Option<String>>>,
-}
-
-// `Provider` is an `#[async_trait]`; implementing its desugared form avoids a
-// test-only dependency on `async-trait`.
-impl Provider for CapturingProvider {
-    fn name(&self) -> &str {
-        "capturing"
-    }
-
-    fn complete<'a, 'b>(
-        &'a self,
-        request: CompletionRequest,
-    ) -> Pin<Box<dyn Future<Output = anyhow::Result<CompletionStream>> + Send + 'b>>
-    where
-        'a: 'b,
-        Self: 'b,
-    {
-        self.prompts
-            .lock()
-            .unwrap()
-            .push(request.system_prompt.clone());
-        self.inner.complete(request)
-    }
-}
-
-async fn system_prompt_seen_by_model(manager: &WorkerManager, id: &str) {
-    let mut events = manager.subscribe();
-    manager.prompt(id, "hi").await.unwrap();
-    tokio::time::timeout(Duration::from_secs(5), async {
-        while let Ok(ev) = events.recv().await {
-            if matches!(ev.inner, WorkerEvent::Agent(AgentEvent::AgentEnd { .. })) {
-                break;
-            }
-        }
-    })
-    .await
-    .expect("timed out waiting for AgentEnd");
-}
-
 #[tokio::test]
 async fn workers_see_resolved_skills_in_their_system_prompt() {
     let data = temp_dir();
@@ -260,16 +214,16 @@ async fn workers_see_resolved_skills_in_their_system_prompt() {
         "[skills] round-trips through worker.toml"
     );
 
-    let provider = Arc::new(CapturingProvider {
-        inner: MockProvider::with_text("ok"),
-        prompts: Mutex::new(Vec::new()),
-    });
+    let provider = Arc::new(CapturingProvider::with_text("ok"));
     let manager = WorkerManager::with_persistence(provider.clone(), store, homes);
     assert_eq!(manager.boot().await.unwrap(), 1);
-    system_prompt_seen_by_model(&manager, &cfg.id).await;
+    prompt_and_wait(&manager, &cfg.id, "hi").await;
 
-    let prompts = provider.prompts.lock().unwrap();
-    let prompt = prompts[0].as_deref().expect("a system prompt was sent");
+    let requests = provider.requests();
+    let prompt = requests[0]
+        .system_prompt
+        .as_deref()
+        .expect("a system prompt was sent");
     assert!(prompt.starts_with("You manage the inbox.\n\n<skills>"));
     assert!(prompt.contains("<description>worker version</description>"));
     assert!(!prompt.contains("global version"), "worker skill overrides");
@@ -280,18 +234,15 @@ async fn workers_see_resolved_skills_in_their_system_prompt() {
 
 #[tokio::test]
 async fn in_memory_workers_have_no_skills() {
-    let provider = Arc::new(CapturingProvider {
-        inner: MockProvider::with_text("ok"),
-        prompts: Mutex::new(Vec::new()),
-    });
+    let provider = Arc::new(CapturingProvider::with_text("ok"));
     let manager = WorkerManager::new(provider.clone());
     let id = manager
         .spawn(WorkerConfig::new("Scratch", "Just a role."))
         .await
         .unwrap();
-    system_prompt_seen_by_model(&manager, &id).await;
+    prompt_and_wait(&manager, &id, "hi").await;
     assert_eq!(
-        provider.prompts.lock().unwrap()[0].as_deref(),
+        provider.requests()[0].system_prompt.as_deref(),
         Some("Just a role.")
     );
 }

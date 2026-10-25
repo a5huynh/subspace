@@ -272,11 +272,23 @@ tokens cannot be safely duplicated.
 - **Delete order.** Remove SQLite rows first, then the directory; an orphaned home dir is
   harmless and reported on boot.
 
-**Home-scoped file tools.** Workers get `home_read` / `home_write` / `home_edit`,
-restricted to their own home. These work even when `enable_core_tools` is off, so skills
-and memory don't depend on unrestricted filesystem access. Write access is limited to
-`skills/` and `memory/`; `worker.toml` and `ROLE.md` are read-only to the worker (changed
-only via the console), so a worker cannot loosen its own policies or rewrite its persona.
+**Home-scoped file tools.** Workers get `home_read` / `home_write` / `home_edit`: the
+engine's read/write/edit tools behind a path guard (`HomeScope`). These work even when
+`enable_core_tools` is off, so skills and memory don't depend on unrestricted filesystem
+access.
+
+- **Read:** the worker's home, the global skills dir, and the real directories of the
+  skills offered to this worker (so `<skills>` locations resolve even when symlinked).
+- **Write:** only inside the home's `skills/` and `memory/`; `worker.toml` and `ROLE.md`
+  are read-only to the worker (changed only via the console), so a worker cannot loosen
+  its own policies or rewrite its persona.
+- **Resolution:** paths are relative to the home (or absolute); `..` is rejected; the
+  deepest existing ancestor is canonicalized (following symlinks) and compared against
+  canonicalized roots, so symlinks cannot escape the scope.
+- **Denials** are returned as tool errors, not run failures, so the model can recover.
+- **Limits:** the check-then-act gap (TOCTOU) is acceptable while workers have no tool
+  that can create symlinks; revisit when core tools are sandboxed. Indexing `memory/`
+  writes into FTS5 arrives with Phase E.
 
 ### Skills
 
@@ -646,7 +658,7 @@ initially (see Deferred).
 |-------|-------------|--------|
 | **0 (done)** | Engine: types, Anthropic provider, tools (read/write/edit/bash), agent loop, context loading, mock provider, minimal TUI | the loop works |
 | **A** | Persistence (SQLite) + `Worker` + `WorkerManager`; one worker, interactive via a minimal API | long-lived, stateful loop |
-| **A4** | Worker Home: `worker.toml` + `ROLE.md` as source of truth, `workers` table as index, migrate A3 rows to homes; skill discovery + injection; home-scoped file tools | identity is portable files |
+| **A4 (done)** | Worker Home: `worker.toml` + `ROLE.md` as source of truth, `workers` table as index, migrate A3 rows to homes; skill discovery + injection; home-scoped file tools | identity is portable files |
 | **B** | Server API (REST + WS) + minimal web console: create worker, chat, watch live events | usable interactively |
 | **C** | Integration framework (actions + credential/secret store) + **email** integration end-to-end (actions only) | worker acts on a real service |
 | **D** | Trigger Router (webhook ingress + pollers + subscriptions) + action approval checkpoint | **secretary reacts to incoming email** |

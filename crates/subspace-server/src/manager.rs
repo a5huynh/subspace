@@ -1,6 +1,7 @@
 //! The Worker Manager: lifecycle for all workers (spawn, deliver, list, shutdown).
 
 use std::collections::{HashMap, HashSet};
+use std::path::Path;
 use std::sync::atomic::AtomicU64;
 use std::sync::{Arc, Mutex};
 
@@ -15,6 +16,7 @@ use tokio::task::JoinHandle;
 use crate::WorkerId;
 use crate::event::ServerEvent;
 use crate::home::Homes;
+use crate::home_tools::{HomeScope, home_tools};
 use crate::skills::{self, Skill, SkillSource};
 use crate::store::SqliteStore;
 use crate::worker::{Stimulus, WorkerConfig, WorkerStatus, run_worker};
@@ -152,14 +154,14 @@ impl WorkerManager {
     async fn start(&self, config: WorkerConfig, history: Vec<Message>) -> Result<WorkerId> {
         let id = config.id.clone();
 
+        let (system_prompt, tools) = self.prepare(&config);
         let agent_config = AgentConfig {
-            system_prompt: self.system_prompt(&config),
+            system_prompt,
             model: config.model.clone(),
             thinking: config.thinking,
             ..AgentConfig::default()
         };
-        // Phase A workers have no tools yet — integrations arrive in Phase C.
-        let agent = Agent::new(agent_config, self.provider.clone(), ToolRegistry::new());
+        let agent = Agent::new(agent_config, self.provider.clone(), tools);
         if !history.is_empty() {
             agent.replace_messages(history).await;
         }
@@ -197,19 +199,38 @@ impl WorkerManager {
         Ok(id)
     }
 
-    /// The worker's role plus its resolved skills. Skills are only available
-    /// with persistence (they live in homes and the global skills dir).
-    fn system_prompt(&self, config: &WorkerConfig) -> String {
+    /// The worker's system prompt (role + resolved skills) and tool registry
+    /// (home-scoped file tools). Both need persistence, since they live in homes.
+    fn prepare(&self, config: &WorkerConfig) -> (String, ToolRegistry) {
+        let mut tools = ToolRegistry::new();
         let Some(p) = &self.persistence else {
-            return config.role.clone();
+            return (config.role.clone(), tools);
         };
-        match resolve_skills(&p.homes, config) {
-            Ok(skills) => skills::compose_system_prompt(&config.role, &skills),
-            Err(e) => {
-                tracing::warn!("worker '{}': skills unavailable: {e:#}", config.id);
-                config.role.clone()
+
+        let skills = resolve_skills(&p.homes, config).unwrap_or_else(|e| {
+            tracing::warn!("worker '{}': skills unavailable: {e:#}", config.id);
+            Vec::new()
+        });
+
+        // The offered skills' real dirs are readable, so the <skills> locations
+        // always resolve even when skills are symlinked from elsewhere.
+        let skill_dirs = skills
+            .iter()
+            .filter_map(|s| s.path.parent().map(Path::to_path_buf));
+        let scope = p
+            .homes
+            .path(&config.id)
+            .and_then(|home| HomeScope::new(&home, p.homes.global_skills_dir(), skill_dirs));
+        match scope {
+            Ok(scope) => {
+                for tool in home_tools(Arc::new(scope)) {
+                    tools.register(tool);
+                }
             }
+            Err(e) => tracing::warn!("worker '{}': home tools unavailable: {e:#}", config.id),
         }
+
+        (skills::compose_system_prompt(&config.role, &skills), tools)
     }
 
     /// Deliver a stimulus to a worker's mailbox.
