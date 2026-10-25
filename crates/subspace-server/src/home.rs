@@ -2,7 +2,7 @@
 //!
 //! ```text
 //! <data_dir>/workers/<worker_id>/
-//! ├── worker.toml   # identity config (name, description, model, thinking)
+//! ├── worker.toml   # identity config (name, description, model, thinking, [skills])
 //! ├── ROLE.md       # persona → system prompt
 //! ├── skills/       # worker-specific skills
 //! └── memory/       # private memory notes
@@ -17,9 +17,12 @@ use anyhow::{Context, Result, anyhow, bail};
 use serde::{Deserialize, Serialize};
 use subspace::types::ThinkingLevel;
 
+use crate::skills::SkillSelection;
 use crate::worker::WorkerConfig;
 
 pub const WORKERS_DIR: &str = "workers";
+/// Global skills shared by all workers, under the data dir.
+pub const GLOBAL_SKILLS_DIR: &str = "skills";
 pub const MANIFEST_FILE: &str = "worker.toml";
 pub const ROLE_FILE: &str = "ROLE.md";
 pub const SKILLS_DIR: &str = "skills";
@@ -38,6 +41,8 @@ struct Manifest {
     model: String,
     #[serde(default)]
     thinking: ThinkingLevel,
+    #[serde(default)]
+    skills: SkillSelection,
 }
 
 /// Result of scanning all homes.
@@ -53,15 +58,33 @@ pub struct HomeListing {
 #[derive(Debug, Clone)]
 pub struct Homes {
     root: PathBuf,
+    global_skills: PathBuf,
 }
 
 impl Homes {
-    /// Homes under `<data_dir>/workers/`. The directory is created if missing.
+    /// Homes under `<data_dir>/workers/`, global skills under
+    /// `<data_dir>/skills/`. Both directories are created if missing.
     pub fn open(data_dir: impl AsRef<Path>) -> Result<Self> {
-        let root = data_dir.as_ref().join(WORKERS_DIR);
-        fs::create_dir_all(&root)
-            .with_context(|| format!("creating workers dir {}", root.display()))?;
-        Ok(Self { root })
+        let data_dir = data_dir.as_ref();
+        let root = data_dir.join(WORKERS_DIR);
+        let global_skills = data_dir.join(GLOBAL_SKILLS_DIR);
+        for dir in [&root, &global_skills] {
+            fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
+        }
+        Ok(Self {
+            root,
+            global_skills,
+        })
+    }
+
+    /// The global skills directory shared by all workers.
+    pub fn global_skills_dir(&self) -> &Path {
+        &self.global_skills
+    }
+
+    /// A worker's own skills directory.
+    pub fn skills_dir(&self, id: &str) -> Result<PathBuf> {
+        Ok(self.path(id)?.join(SKILLS_DIR))
     }
 
     /// Path of a worker's home (whether or not it exists).
@@ -128,6 +151,7 @@ impl Homes {
             role,
             model: m.model,
             thinking: m.thinking,
+            skills: m.skills,
         })
     }
 
@@ -184,6 +208,7 @@ fn write_files(dir: &Path, cfg: &WorkerConfig) -> Result<()> {
         description: cfg.description.clone(),
         model: cfg.model.clone(),
         thinking: cfg.thinking,
+        skills: cfg.skills.clone(),
     };
     write_atomic(
         &dir.join(MANIFEST_FILE),

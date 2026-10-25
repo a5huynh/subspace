@@ -7,6 +7,7 @@
 pub mod event;
 pub mod home;
 pub mod manager;
+pub mod skills;
 pub mod store;
 pub mod worker;
 

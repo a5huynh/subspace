@@ -208,7 +208,7 @@ struct WorkerConfig {
     model: String,                // defaults to engine default (claude-opus-4-8)
     thinking: ThinkingLevel,      // engine type
     policies: Vec<PolicyRule>,    // action approval rules
-    skills: SkillSelection,       // which global/built-in skills are enabled (default: all)
+    skills: SkillSelection,       // [skills] disabled = [...]; default: all enabled
     enable_core_tools: bool,      // read/write/edit/bash (sandboxed) — off by default
     working_dir: Option<PathBuf>, // cwd for core tools; separate from the home dir
 
@@ -287,12 +287,17 @@ skills/<name>/
 ```
 
 - **Discovery:** worker `skills/` → global `<data_dir>/skills/` → built-ins compiled into
-  the server. First match by name wins, so a worker can override a shared skill.
+  the server (none yet). First match by name wins, so a worker can override a shared
+  skill. Each `<name>/SKILL.md` one level down is a skill; symlinked skill dirs are
+  followed. Broken skills are logged and skipped. Re-read whenever a worker starts.
+- **Selection:** all discovered skills are enabled unless listed in `worker.toml`:
+  `[skills]` / `disabled = ["name", ...]`.
 - **No copying.** Global skills are looked up, not copied into each home, so updates
   reach every worker and a worker's overrides are never clobbered.
-- **Injection:** only `name` + `description` for enabled skills go into the system prompt,
-  as a compact list with each skill's path. The worker reads the body with `home_read`
-  (or `read` for global skills, via a read-only scoped path) when relevant.
+- **Injection:** a `<skills>` block appended after `ROLE.md`, one
+  `<skill><name/><description/><location/></skill>` per enabled skill (XML-escaped;
+  `location` is the absolute `SKILL.md` path). The worker reads the body on demand via
+  the home-scoped tools, which allow reads within its home and the global skills dir.
 - **Authoring:** a worker may create/edit skills in its own `skills/` with `home_write` /
   `home_edit`. Global skills are edited by humans (console or filesystem).
 - **Frontmatter:** only `name` and `description` are required; a minimal hand-rolled

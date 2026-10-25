@@ -15,6 +15,7 @@ use tokio::task::JoinHandle;
 use crate::WorkerId;
 use crate::event::ServerEvent;
 use crate::home::Homes;
+use crate::skills::{self, Skill, SkillSource};
 use crate::store::SqliteStore;
 use crate::worker::{Stimulus, WorkerConfig, WorkerStatus, run_worker};
 
@@ -152,7 +153,7 @@ impl WorkerManager {
         let id = config.id.clone();
 
         let agent_config = AgentConfig {
-            system_prompt: config.role.clone(),
+            system_prompt: self.system_prompt(&config),
             model: config.model.clone(),
             thinking: config.thinking,
             ..AgentConfig::default()
@@ -194,6 +195,21 @@ impl WorkerManager {
             },
         );
         Ok(id)
+    }
+
+    /// The worker's role plus its resolved skills. Skills are only available
+    /// with persistence (they live in homes and the global skills dir).
+    fn system_prompt(&self, config: &WorkerConfig) -> String {
+        let Some(p) = &self.persistence else {
+            return config.role.clone();
+        };
+        match resolve_skills(&p.homes, config) {
+            Ok(skills) => skills::compose_system_prompt(&config.role, &skills),
+            Err(e) => {
+                tracing::warn!("worker '{}': skills unavailable: {e:#}", config.id);
+                config.role.clone()
+            }
+        }
     }
 
     /// Deliver a stimulus to a worker's mailbox.
@@ -319,4 +335,14 @@ async fn migrate_legacy_workers(p: &Persistence) -> Result<usize> {
         migrated += 1;
     }
     Ok(migrated)
+}
+
+/// Discover a worker's skills (its own, then global), logging broken ones.
+fn resolve_skills(homes: &Homes, config: &WorkerConfig) -> Result<Vec<Skill>> {
+    let worker = skills::discover(&homes.skills_dir(&config.id)?, SkillSource::Worker)?;
+    let global = skills::discover(homes.global_skills_dir(), SkillSource::Global)?;
+    for (path, err) in worker.invalid.iter().chain(&global.invalid) {
+        tracing::warn!("skipping skill {}: {err:#}", path.display());
+    }
+    Ok(skills::resolve(worker, global, &config.skills))
 }

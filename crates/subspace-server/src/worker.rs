@@ -10,6 +10,7 @@ use tokio::sync::{broadcast, mpsc};
 
 use crate::WorkerId;
 use crate::event::{ServerEvent, WorkerEvent};
+use crate::skills::SkillSelection;
 use crate::store::SqliteStore;
 
 /// Static configuration for a worker.
@@ -24,6 +25,9 @@ pub struct WorkerConfig {
     pub role: String,
     pub model: String,
     pub thinking: ThinkingLevel,
+    /// Which discovered skills are enabled (default: all).
+    #[serde(default)]
+    pub skills: SkillSelection,
 }
 
 impl WorkerConfig {
@@ -36,6 +40,7 @@ impl WorkerConfig {
             role: role.into(),
             model: subspace::agent::AgentConfig::default().model,
             thinking: ThinkingLevel::Low,
+            skills: SkillSelection::default(),
         }
     }
 }

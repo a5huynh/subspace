@@ -45,6 +45,7 @@ impl LegacyWorker {
             role: self.role.clone(),
             model: self.model.clone(),
             thinking: serde_json::from_str(&self.thinking)?,
+            skills: Default::default(),
         })
     }
 }
