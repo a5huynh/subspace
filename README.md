@@ -30,11 +30,13 @@ A Rust agent harness and orchestration library. Think [pi](https://github.com/ma
 
 ## Crate Structure
 
-This is a Cargo workspace with two crates:
+This is a Cargo workspace with three crates, plus a web console:
 
 | Crate | Description |
 |-------|-------------|
 | [`subspace`](crates/subspace/) | Core library — types, provider trait, tools, agent loop |
+| [`subspace-server`](crates/subspace-server/) | Server: long-lived workers, on-disk homes + skills, REST/WebSocket API (see [SPEC-v2](docs/SPEC-v2.md)) |
+| [`console/`](console/) | Web console (React + Vite + TypeScript) for the server |
 | [`subspace-tui`](crates/subspace-tui/) | CLI/TUI binary — interactive terminal interface |
 
 ## Getting Started
@@ -64,6 +66,27 @@ cargo run -p subspace-tui
 
 # Single-shot print mode
 cargo run -p subspace-tui -- -p "Explain this project"
+```
+
+### Run the server
+
+```bash
+# Serves the API on http://127.0.0.1:7700; data lives in ~/.subspace
+cargo run -p subspace-server
+
+# Elsewhere / another port
+cargo run -p subspace-server -- --data-dir ./data --bind 127.0.0.1:8080
+```
+
+The API has no authentication, so keep it on loopback. Each worker's identity lives in
+`<data-dir>/workers/<id>/` (`worker.toml`, `ROLE.md`, `skills/`, `memory/`); global skills
+go in `<data-dir>/skills/`.
+
+The console's TypeScript API types are generated from the Rust wire types with
+[ts-rs](https://github.com/Aleph-Alpha/ts-rs). After changing them, regenerate:
+
+```bash
+UPDATE_TS_BINDINGS=1 cargo test -p subspace-server --test ts_bindings
 ```
 
 ### CLI Options
@@ -130,9 +153,9 @@ async fn main() -> anyhow::Result<()> {
 - [x] Tool system (read, write, edit, bash)
 - [x] Agent loop with streaming events
 - [x] Minimal TUI for interactive testing
-- [ ] Supervisor / multi-agent orchestration
-- [ ] RPC mode (JSONL over stdio)
-- [ ] Session persistence (JSONL file-backed)
+- [x] Server: persistent workers, worker homes, skills, home-scoped tools (SPEC-v2 Phase A)
+- [ ] Server API + web console (SPEC-v2 Phase B, in progress)
+- [ ] Integrations, triggers, approvals, memory, multi-worker coordination (SPEC-v2 Phases C to F)
 - [ ] Additional providers (OpenAI, etc.)
 
 ## Design Decisions

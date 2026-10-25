@@ -2528,6 +2528,9 @@ dependencies = [
  "anyhow",
  "axum",
  "chrono",
+ "clap 4.6.0",
+ "dirs",
+ "dotenv",
  "futures-util",
  "reqwest",
  "serde",
@@ -2538,6 +2541,7 @@ dependencies = [
  "tokio-tungstenite",
  "toml",
  "tracing",
+ "tracing-subscriber",
  "ts-rs",
 ]
 
