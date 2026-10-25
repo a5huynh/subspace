@@ -1,0 +1,46 @@
+[package]
+name = "subspace"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+# Async runtime
+tokio = { version = "1", features = ["full"] }
+tokio-util = "0.7"
+
+# HTTP client for LLM APIs
+reqwest = { version = "0.12", features = ["json", "stream"] }
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# Streaming / SSE parsing
+eventsource-stream = "0.2"
+futures = "0.3"
+tokio-stream = "0.1"
+
+# Unique IDs
+uuid = { version = "1", features = ["v4"] }
+
+# Timestamps
+chrono = { version = "0.4", features = ["serde"] }
+
+# Error handling
+anyhow = "1"
+thiserror = "2"
+
+# Async traits
+async-trait = "0.1"
+
+# Home dir
+dirs = "6"
+
+# Logging
+tracing = "0.1"
+
+# TypeScript bindings for wire types (enabled by the server)
+ts-rs = { version = "12", optional = true, features = ["chrono-impl", "serde-json-impl"] }
+
+[features]
+ts = ["dep:ts-rs"]

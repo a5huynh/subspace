@@ -1,6 +1,7 @@
 [workspace]
 members = [
-    "crates/pingspace",
-    "crates/pingspace-tui",
+    "crates/subspace",
+    "crates/subspace-server",
+    "crates/subspace-tui",
 ]
 resolver = "3"

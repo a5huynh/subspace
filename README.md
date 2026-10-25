@@ -1,4 +1,4 @@
-# 🛰️ Pingspace
+# 🛰️ Subspace
 
 A Rust agent harness and orchestration library. Think [pi](https://github.com/mariozechner/pi-coding-agent) but as an embeddable Rust library with first-class support for multi-agent orchestration via a supervisor model.
 
@@ -6,7 +6,7 @@ A Rust agent harness and orchestration library. Think [pi](https://github.com/ma
 
 ## Goals
 
-- **Library-first** — `pingspace` is a Rust crate you embed. The CLI/TUI is a thin consumer.
+- **Library-first** — `subspace` is a Rust crate you embed. The CLI/TUI is a thin consumer.
 - **Agent loop** — LLM ↔ tool execution loop with streaming events.
 - **Multi-agent orchestration** — A supervisor can spawn, coordinate, and manage multiple agents.
 - **Provider-agnostic** — Trait-based provider system (Anthropic implemented, others can slot in).
@@ -30,12 +30,14 @@ A Rust agent harness and orchestration library. Think [pi](https://github.com/ma
 
 ## Crate Structure
 
-This is a Cargo workspace with two crates:
+This is a Cargo workspace with three crates, plus a web console:
 
 | Crate | Description |
 |-------|-------------|
-| [`pingspace`](crates/pingspace/) | Core library — types, provider trait, tools, agent loop |
-| [`pingspace-tui`](crates/pingspace-tui/) | CLI/TUI binary — interactive terminal interface |
+| [`subspace`](crates/subspace/) | Core library — types, provider trait, tools, agent loop |
+| [`subspace-server`](crates/subspace-server/) | Server: long-lived workers, on-disk homes + skills, REST/WebSocket API (see [SPEC-v2](docs/SPEC-v2.md)) |
+| [`console/`](console/) | Web console (React + Vite + TypeScript) for the server |
+| [`subspace-tui`](crates/subspace-tui/) | CLI/TUI binary — interactive terminal interface |
 
 ## Getting Started
 
@@ -48,8 +50,8 @@ This is a Cargo workspace with two crates:
 
 ```bash
 # Clone the repo
-git clone https://github.com/a5huynh/pingspace.git
-cd pingspace
+git clone https://github.com/a5huynh/subspace.git
+cd subspace
 
 # Set your API key
 export ANTHROPIC_API_KEY="sk-ant-..."
@@ -60,23 +62,50 @@ echo 'ANTHROPIC_API_KEY=sk-ant-...' > .env
 cargo build --release
 
 # Run interactive TUI
-cargo run -p pingspace-tui
+cargo run -p subspace-tui
 
 # Single-shot print mode
-cargo run -p pingspace-tui -- -p "Explain this project"
+cargo run -p subspace-tui -- -p "Explain this project"
+```
+
+### Run the server
+
+```bash
+# Serves the API on http://127.0.0.1:7700; data lives in ~/.subspace
+cargo run -p subspace-server
+
+# Elsewhere / another port
+cargo run -p subspace-server -- --data-dir ./data --bind 127.0.0.1:8080
+```
+
+Then start the web console (proxies `/api` to the server):
+
+```bash
+cd console && npm install && npm run dev   # http://localhost:5173
+```
+
+The API has no authentication, so keep it on loopback. Each worker's identity lives in
+`<data-dir>/workers/<id>/` (`worker.toml`, `ROLE.md`, `skills/`, `memory/`); global skills
+go in `<data-dir>/skills/`.
+
+The console's TypeScript API types are generated from the Rust wire types with
+[ts-rs](https://github.com/Aleph-Alpha/ts-rs). After changing them, regenerate:
+
+```bash
+UPDATE_TS_BINDINGS=1 cargo test -p subspace-server --test ts_bindings
 ```
 
 ### CLI Options
 
 ```
-pingspace [OPTIONS] [MESSAGE...]
+subspace [OPTIONS] [MESSAGE...]
 
 Arguments:
   [MESSAGE...]  Initial message to send
 
 Options:
   -p, --print              Print mode: send prompt, print response, exit
-      --model <MODEL>      Model ID [default: claude-sonnet-4-6]
+      --model <MODEL>      Model ID [default: claude-opus-4-8]
       --thinking <LEVEL>   Thinking level: off, low, medium, high
   -h, --help               Print help
   -V, --version            Print version
@@ -87,7 +116,7 @@ Options:
 The core library can be embedded in any Rust application:
 
 ```rust
-use pingspace::prelude::*;
+use subspace::prelude::*;
 use std::sync::Arc;
 
 #[tokio::main]
@@ -130,9 +159,9 @@ async fn main() -> anyhow::Result<()> {
 - [x] Tool system (read, write, edit, bash)
 - [x] Agent loop with streaming events
 - [x] Minimal TUI for interactive testing
-- [ ] Supervisor / multi-agent orchestration
-- [ ] RPC mode (JSONL over stdio)
-- [ ] Session persistence (JSONL file-backed)
+- [x] Server: persistent workers, worker homes, skills, home-scoped tools (SPEC-v2 Phase A)
+- [ ] Server API + web console (SPEC-v2 Phase B, in progress)
+- [ ] Integrations, triggers, approvals, memory, multi-worker coordination (SPEC-v2 Phases C to F)
 - [ ] Additional providers (OpenAI, etc.)
 
 ## Design Decisions
