@@ -168,21 +168,20 @@ memory tools. Nothing new at the trait level.
 subspace/                      # workspace root
 ├── crates/
 │   ├── subspace/              # ENGINE (existing): types, provider, tools, agent, context
-│   ├── subspace-server/       # NEW: the daemon (bulk of new work)
-│   │   ├── src/
-│   │   │   ├── main.rs        # bootstrap: config, db, http server, worker manager
-│   │   │   ├── worker/        # Worker, Mailbox, Stimulus, runtime loop
-│   │   │   ├── manager.rs     # Worker Manager (lifecycle)
-│   │   │   ├── home.rs        # Worker Home: layout, worker.toml, ROLE.md, scoped file tools
-│   │   │   ├── skills.rs      # skill discovery, frontmatter, layered lookup
-│   │   │   ├── integration/   # Integration trait + built-ins (email, ...)
-│   │   │   ├── trigger/       # event ingress, router, subscriptions
-│   │   │   ├── memory/        # private store + shared wiki + memory tools
-│   │   │   ├── secrets.rs     # encrypted credential store
-│   │   │   ├── policy.rs      # action policies / approval evaluation
-│   │   │   ├── store/         # SQLite persistence
-│   │   │   └── api/           # REST + WS + webhook ingress
-│   └── subspace-tui/          # existing CLI/TUI — demoted to a thin API client
+│   └── subspace-server/       # NEW: the daemon (bulk of new work)
+│       ├── src/
+│       │   ├── main.rs        # bootstrap: config, db, http server, worker manager
+│       │   ├── worker/        # Worker, Mailbox, Stimulus, runtime loop
+│       │   ├── manager.rs     # Worker Manager (lifecycle)
+│       │   ├── home.rs        # Worker Home: layout, worker.toml, ROLE.md, scoped file tools
+│       │   ├── skills.rs      # skill discovery, frontmatter, layered lookup
+│       │   ├── integration/   # Integration trait + built-ins (email, ...)
+│       │   ├── trigger/       # event ingress, router, subscriptions
+│       │   ├── memory/        # private store + shared wiki + memory tools
+│       │   ├── secrets.rs     # encrypted credential store
+│       │   ├── policy.rs      # action policies / approval evaluation
+│       │   ├── store/         # SQLite persistence
+│       │   └── api/           # REST + WS + webhook ingress
 └── console/                   # NEW: React (Vite + TS) web client
 ```
 
@@ -576,9 +575,6 @@ enum WorkerEvent {
 - `POST /ingress/{integration}` — raw inbound events from external services; normalized by
   the integration, then handed to the Trigger Router.
 
-The `subspace-tui` CLI becomes a thin client of this API (interactive = open a stream +
-POST prompts; single-shot = POST prompt, read stream to completion).
-
 ---
 
 ## Guardrails, Policies & Approvals
@@ -662,7 +658,7 @@ initially (see Deferred).
 | **0 (done)** | Engine: types, Anthropic provider, tools (read/write/edit/bash), agent loop, context loading, mock provider, minimal TUI | the loop works |
 | **A** | Persistence (SQLite) + `Worker` + `WorkerManager`; one worker, interactive via a minimal API | long-lived, stateful loop |
 | **A4 (done)** | Worker Home: `worker.toml` + `ROLE.md` as source of truth, `workers` table as index, migrate A3 rows to homes; skill discovery + injection; home-scoped file tools | identity is portable files |
-| **B** | Server API (REST + WS) + minimal web console: create worker, chat, watch live events | usable interactively |
+| **B (done)** | Server API (REST + WS) + minimal web console: create worker, chat, watch live events | usable interactively |
 | **C** | Integration framework (actions + credential/secret store) + **email** integration end-to-end (actions only) | worker acts on a real service |
 | **D** | Trigger Router (webhook ingress + pollers + subscriptions) + action approval checkpoint | **secretary reacts to incoming email** |
 | **E** | Memory: private memory tools + shared wiki (FTS + versioned propose/approve) + console curation | knowledge substrate |
@@ -745,5 +741,4 @@ incoming email *and* answers questions about it. `E` and `F` enrich from there.
 | `toml` | parse/write `worker.toml` | **approved** |
 
 Already in the workspace and reused: `tokio`, `reqwest`, `serde`/`serde_json`, `clap`,
-`anyhow`/`thiserror`, `async-trait`, `chrono`, `uuid`, `tracing`, `dirs`, `tokio-util`,
-`ratatui`/`crossterm` (TUI client).
+`anyhow`/`thiserror`, `async-trait`, `chrono`, `uuid`, `tracing`, `dirs`, `tokio-util`.

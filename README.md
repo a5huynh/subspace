@@ -6,7 +6,7 @@ A Rust agent harness and orchestration library. Think [pi](https://github.com/ma
 
 ## Goals
 
-- **Library-first** — `subspace` is a Rust crate you embed. The CLI/TUI is a thin consumer.
+- **Library-first** — `subspace` is a Rust crate you embed. The server and web console are consumers.
 - **Agent loop** — LLM ↔ tool execution loop with streaming events.
 - **Multi-agent orchestration** — A supervisor can spawn, coordinate, and manage multiple agents.
 - **Provider-agnostic** — Trait-based provider system (Anthropic implemented, others can slot in).
@@ -15,29 +15,25 @@ A Rust agent harness and orchestration library. Think [pi](https://github.com/ma
 
 ```
 ┌──────────────────────────────────────────────────┐
-│                   Consumers                       │
-│   CLI (TUI)  │  RPC Mode (stdio)  │  Your App   │
+│        Web console (React)  │  Your App           │
 ├──────────────────────────────────────────────────┤
-│              ┌──────────────┐                     │
-│              │  Supervisor  │  (optional)          │
-│              └──────┬───────┘                     │
-│          ┌──────────┼──────────┐                  │
-│       Agent 1    Agent 2    Agent N               │
+│  subspace-server: REST + WebSocket API            │
+│  Worker Manager → Worker 1 … Worker N             │
+│  (worker homes, skills, SQLite history)           │
 ├──────────────────────────────────────────────────┤
-│   Tool Registry  │  Provider (LLM)  │  Session   │
+│  subspace: agent loop │ tools │ provider (LLM)    │
 └──────────────────────────────────────────────────┘
 ```
 
 ## Crate Structure
 
-This is a Cargo workspace with three crates, plus a web console:
+This is a Cargo workspace with two crates, plus a web console:
 
 | Crate | Description |
 |-------|-------------|
 | [`subspace`](crates/subspace/) | Core library — types, provider trait, tools, agent loop |
 | [`subspace-server`](crates/subspace-server/) | Server: long-lived workers, on-disk homes + skills, REST/WebSocket API (see [SPEC-v2](docs/SPEC-v2.md)) |
 | [`console/`](console/) | Web console (React + Vite + TypeScript) for the server |
-| [`subspace-tui`](crates/subspace-tui/) | CLI/TUI binary — interactive terminal interface |
 
 ## Getting Started
 
@@ -60,12 +56,6 @@ echo 'ANTHROPIC_API_KEY=sk-ant-...' > .env
 
 # Build
 cargo build --release
-
-# Run interactive TUI
-cargo run -p subspace-tui
-
-# Single-shot print mode
-cargo run -p subspace-tui -- -p "Explain this project"
 ```
 
 ### Run the server
@@ -93,22 +83,6 @@ The console's TypeScript API types are generated from the Rust wire types with
 
 ```bash
 UPDATE_TS_BINDINGS=1 cargo test -p subspace-server --test ts_bindings
-```
-
-### CLI Options
-
-```
-subspace [OPTIONS] [MESSAGE...]
-
-Arguments:
-  [MESSAGE...]  Initial message to send
-
-Options:
-  -p, --print              Print mode: send prompt, print response, exit
-      --model <MODEL>      Model ID [default: claude-opus-4-8]
-      --thinking <LEVEL>   Thinking level: off, low, medium, high
-  -h, --help               Print help
-  -V, --version            Print version
 ```
 
 ## Library Usage
@@ -158,9 +132,8 @@ async fn main() -> anyhow::Result<()> {
 - [x] Core types & Anthropic provider
 - [x] Tool system (read, write, edit, bash)
 - [x] Agent loop with streaming events
-- [x] Minimal TUI for interactive testing
 - [x] Server: persistent workers, worker homes, skills, home-scoped tools (SPEC-v2 Phase A)
-- [ ] Server API + web console (SPEC-v2 Phase B, in progress)
+- [x] Server API + web console (SPEC-v2 Phase B)
 - [ ] Integrations, triggers, approvals, memory, multi-worker coordination (SPEC-v2 Phases C to F)
 - [ ] Additional providers (OpenAI, etc.)
 
