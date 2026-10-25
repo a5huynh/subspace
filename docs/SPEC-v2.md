@@ -54,6 +54,14 @@ The product is a "team of agents you manage," not a library you embed.
 - **Worker** — a persistent, named, independently-operating agent (think: an employee).
   It has a role (system prompt), bound integrations, private memory/history, and a
   lifecycle that outlives any single task. Workers do not share conversation state.
+- **Worker Home** — a per-worker directory holding everything *authored* about the worker:
+  config (`worker.toml`), persona (`ROLE.md`), skills, and private memory notes. Copying a
+  home clones the agent. Runtime state (history, events, approvals, credentials) lives in
+  SQLite, never in the home. See [Worker Home](#worker-home-on-disk).
+- **Skill** — a directory containing a `SKILL.md` (frontmatter `name` + `description`, then
+  instructions) plus optional supporting files. Only the name/description are injected;
+  the worker reads the body on demand (progressive disclosure). Skills are resolved by
+  layered lookup: worker → global → built-in.
 - **Mailbox** — a per-worker input queue. Both user prompts and routed integration events
   land here as **Stimuli**. The worker's agent loop consumes the mailbox; it does not care
   whether an item came from a human or a webhook. This is the primitive that unifies
@@ -67,6 +75,7 @@ The product is a "team of agents you manage," not a library you embed.
 - **Memory (tiered):**
   - **Working** — the current task's message list (engine already handles this).
   - **Private** — per-worker long-term memory; freely writable by the worker via tools.
+    Stored as markdown files in the worker home, indexed into SQLite FTS5.
   - **Shared** — a company wiki: readable by all workers, but **writes are proposals**
     that a human (or a designated worker) approves — the git PR model, minus git.
   - Access is **tools-first** with **progressive disclosure** (search/read on demand),
@@ -164,6 +173,8 @@ subspace/                      # workspace root
 │   │   │   ├── main.rs        # bootstrap: config, db, http server, worker manager
 │   │   │   ├── worker/        # Worker, Mailbox, Stimulus, runtime loop
 │   │   │   ├── manager.rs     # Worker Manager (lifecycle)
+│   │   │   ├── home.rs        # Worker Home: layout, worker.toml, ROLE.md, scoped file tools
+│   │   │   ├── skills.rs      # skill discovery, frontmatter, layered lookup
 │   │   │   ├── integration/   # Integration trait + built-ins (email, ...)
 │   │   │   ├── trigger/       # event ingress, router, subscriptions
 │   │   │   ├── memory/        # private store + shared wiki + memory tools
@@ -186,16 +197,24 @@ Illustrative Rust. IDs are UUID-v4 strings (`Id` from the engine's `types.rs`).
 ```rust
 type WorkerId = Id;
 
+/// Loaded from `workers/<id>/worker.toml` + `ROLE.md` (identity), joined with wiring
+/// from SQLite. The home directory is the source of truth for identity fields.
 struct WorkerConfig {
+    // identity — from the worker home
     id: WorkerId,
-    name: String,                 // "Secretary"
-    role: String,                 // system prompt / persona
+    name: String,                 // "Secretary" (display only; dirs are keyed by id)
+    description: String,          // one line: what this worker is good at (used for routing)
+    role: String,                 // system prompt / persona — contents of ROLE.md
     model: String,                // defaults to engine default (claude-opus-4-8)
     thinking: ThinkingLevel,      // engine type
+    policies: Vec<PolicyRule>,    // action approval rules
+    skills: SkillSelection,       // which global/built-in skills are enabled (default: all)
+    enable_core_tools: bool,      // read/write/edit/bash (sandboxed) — off by default
+    working_dir: Option<PathBuf>, // cwd for core tools; separate from the home dir
+
+    // wiring — from SQLite (never copied on clone)
     integrations: Vec<IntegrationBinding>,  // which integrations + which credential
     subscriptions: Vec<Subscription>,       // which events wake this worker
-    policies: Vec<PolicyRule>,               // action approval rules
-    enable_core_tools: bool,      // read/write/edit/bash (sandboxed) — off by default
 }
 
 enum WorkerStatus { Idle, Running, AwaitingApproval, Paused, Error(String) }
@@ -207,6 +226,79 @@ struct Worker {
     status: WorkerStatus,
 }
 ```
+
+### Worker Home (on-disk)
+
+```
+<data_dir>/
+├── subspace.db                  # operational state (see Persistence Schema)
+├── skills/<skill>/SKILL.md      # global skills, available to all workers
+├── wiki/                        # shared wiki docs (storage TBD — see Open Questions)
+└── workers/<worker_id>/         # one Worker Home per worker
+    ├── worker.toml              # identity config: name, description, model, thinking,
+    │                            #   policies, skill selection, core-tool settings
+    ├── ROLE.md                  # persona / standing instructions → system prompt
+    ├── skills/<skill>/SKILL.md  # worker-specific skills (override same-named global ones)
+    └── memory/*.md              # private memory notes
+```
+
+**Identity vs. wiring vs. state.** Every piece of worker data falls in exactly one bucket,
+which defines where it lives and what a clone/export carries:
+
+| Bucket | Examples | Lives in | Cloned / exported? |
+|--------|----------|----------|--------------------|
+| Identity | config (incl. approval policies), persona, skills, curated memory | Worker Home | yes \* |
+| Wiring | integration bindings, credentials, subscriptions | SQLite | **no** — rebound per worker |
+| State | history, events, approvals, action log, status | SQLite | no (full backup only) |
+
+\* Policies travel with a clone on purpose: a copied worker starts with the same approval
+rules as its source (conservative by default) and is loosened explicitly if needed.
+
+Wiring is excluded because some credentials are exclusive (see
+[exclusive sources](#integration-registry--event-ingress)) and single-use OAuth refresh
+tokens cannot be safely duplicated.
+
+**Rules:**
+
+- **Keyed by id, not name.** Renames touch only `worker.toml`.
+- **One source of truth.** The home is authoritative for identity; the `workers` table is
+  an index rebuilt from homes on `boot()`. Console `PATCH /workers/{id}` writes
+  `worker.toml` / `ROLE.md`, then refreshes the index.
+- **Single writer.** The server is the only process that writes a home (the Worker Manager
+  owns one loop per worker). Hand edits are allowed while stopped, or picked up at the
+  next session start.
+- **Read at session start.** Identity files are (re)read when a worker boots or starts a
+  fresh context. No file watching initially.
+- **Delete order.** Remove SQLite rows first, then the directory; an orphaned home dir is
+  harmless and reported on boot.
+
+**Home-scoped file tools.** Workers get `home_read` / `home_write` / `home_edit`,
+restricted to their own home. These work even when `enable_core_tools` is off, so skills
+and memory don't depend on unrestricted filesystem access. Write access is limited to
+`skills/` and `memory/`; `worker.toml` and `ROLE.md` are read-only to the worker (changed
+only via the console), so a worker cannot loosen its own policies or rewrite its persona.
+
+### Skills
+
+```
+skills/<name>/
+├── SKILL.md        # ---\nname: ...\ndescription: ...\n---\n<instructions>
+└── ...             # optional scripts, references, templates
+```
+
+- **Discovery:** worker `skills/` → global `<data_dir>/skills/` → built-ins compiled into
+  the server. First match by name wins, so a worker can override a shared skill.
+- **No copying.** Global skills are looked up, not copied into each home, so updates
+  reach every worker and a worker's overrides are never clobbered.
+- **Injection:** only `name` + `description` for enabled skills go into the system prompt,
+  as a compact list with each skill's path. The worker reads the body with `home_read`
+  (or `read` for global skills, via a read-only scoped path) when relevant.
+- **Authoring:** a worker may create/edit skills in its own `skills/` with `home_write` /
+  `home_edit`. Global skills are edited by humans (console or filesystem).
+- **Frontmatter:** only `name` and `description` are required; a minimal hand-rolled
+  `key: value` parser covers this without a YAML dependency.
+- **Compatibility:** the format matches pi / Claude-style `SKILL.md` directories, so
+  existing skill packs can be dropped in.
 
 ### Mailbox & Stimulus
 
@@ -274,6 +366,8 @@ struct Subscription {
 
 ```rust
 /// Private, per-worker. Freely writable by the worker.
+/// Backed by `workers/<id>/memory/*.md`; `memory_notes` in SQLite is an FTS5 index
+/// rebuilt from those files on boot and updated on every write.
 #[async_trait]
 trait PrivateMemory: Send + Sync {
     async fn save(&self, worker: &WorkerId, note: MemoryNote) -> Result<Id>;
@@ -381,6 +475,18 @@ hook — TBD in Phase D.)
 - **Trigger Router** — indexes subscriptions; for each incoming `Event`, finds matching
   subscriptions (by `integration` + `event_kind` + `filter`) and delivers a
   `Stimulus::Event` to each subscriber's mailbox.
+- **Exclusive sources.** Fan-out applies to *events*, not *connections*. Sources that hold a
+  credential-bound session (IMAP IDLE, bot long-polling) must have exactly one owner: the
+  registry takes a lock per `(integration, credential fingerprint)` and refuses to start a
+  second source on the same credential, naming the worker that holds it.
+
+### History & Compaction
+
+A worker's conversation is continuous: history is reloaded on boot and appended forever.
+To keep context bounded, `ControlMsg::Compact` (also triggered automatically past a token
+threshold) summarizes older turns into a compaction record and starts a fresh working
+context. The full transcript stays in `messages`; only the agent's working context is
+replaced. A "new task" is a compaction, never a fork into a separate conversation.
 
 ---
 
@@ -505,17 +611,21 @@ approval/curation workflows.
 
 SQLite (single-node, self-hosted). Illustrative tables:
 
+Authored content (config, persona, skills, memory notes, possibly wiki docs) lives in the
+[Worker Home](#worker-home-on-disk) and is indexed here; SQLite is authoritative only
+for wiring and state.
+
 | Table | Key columns |
 |-------|-------------|
-| `workers` | id, name, role, model, thinking, status, enable_core_tools, created_at |
+| `workers` | id, name, description, home_path, status, created_at — **index** rebuilt from homes |
 | `worker_integrations` | worker_id, integration, credential_ref |
 | `subscriptions` | id, worker_id, integration, event_kind, filter(json) |
 | `messages` | id, worker_id, role, content(json), ts — conversation history |
-| `memory_notes` | id, worker_id, text, tags(json), ts (+ FTS index) |
+| `memory_notes` | id, worker_id, path, text, tags(json), ts — FTS5 **index** over `memory/*.md` |
+| `compactions` | id, worker_id, summary, through_seq, ts |
 | `wiki_docs` | path, title, current_rev |
 | `wiki_revisions` | id, path, content, author (worker/human), status(proposed/approved), ts |
 | `credentials` | worker_id, integration, ciphertext, nonce |
-| `policies` | id, worker_id, rule(json) |
 | `pending_approvals` | action_id, worker_id, tool, args(json), ts |
 | `action_log` | id, worker_id, tool, args(json), decision, approved_by, ts |
 
@@ -530,11 +640,12 @@ initially (see Deferred).
 |-------|-------------|--------|
 | **0 (done)** | Engine: types, Anthropic provider, tools (read/write/edit/bash), agent loop, context loading, mock provider, minimal TUI | the loop works |
 | **A** | Persistence (SQLite) + `Worker` + `WorkerManager`; one worker, interactive via a minimal API | long-lived, stateful loop |
+| **A4** | Worker Home: `worker.toml` + `ROLE.md` as source of truth, `workers` table as index, migrate A3 rows to homes; skill discovery + injection; home-scoped file tools | identity is portable files |
 | **B** | Server API (REST + WS) + minimal web console: create worker, chat, watch live events | usable interactively |
 | **C** | Integration framework (actions + credential/secret store) + **email** integration end-to-end (actions only) | worker acts on a real service |
 | **D** | Trigger Router (webhook ingress + pollers + subscriptions) + action approval checkpoint | **secretary reacts to incoming email** |
 | **E** | Memory: private memory tools + shared wiki (FTS + versioned propose/approve) + console curation | knowledge substrate |
-| **F** | Multi-worker + cross-worker delegation (agents-as-tools / mailbox messages) | the "workforce" |
+| **F** | Multi-worker coordination: ephemeral delegation (agents-as-tools) + durable handoffs (task table / mailbox messages), routed by worker `description` | the "workforce" |
 | **Later** | more integrations, MCP integration interface, semantic search, tool sandboxing, additional providers | scale/hardening |
 
 `A → B → C → D` is the fastest path to the compelling demo: a secretary that reacts to
@@ -549,6 +660,10 @@ incoming email *and* answers questions about it. `E` and `F` enrich from there.
 - **Manager, not Supervisor.** The old `Strategy`/`Step`/`Decision` machinery is dropped.
   Lifecycle lives in the Worker Manager; *in-worker* delegation is agents-as-tools;
   *cross-worker* coordination is mailbox messages (Phase F).
+- **Files for authored content, SQLite for operational state.** Persona, config, skills,
+  and memory notes are files in a per-worker home (editable, diffable, cloneable); history,
+  events, approvals, credentials, and subscriptions are rows. Each datum has one source of
+  truth; SQLite indexes the files rather than duplicating them.
 - **Integrations & memory are just Tools.** Reuses the engine's `Tool`/`ToolRegistry`;
   no parallel abstraction. Actions, `wiki_search`, `memory_save` are all tools.
 - **Shared knowledge = versioned proposals.** Private memory is free-write; the shared
@@ -573,8 +688,18 @@ incoming email *and* answers questions about it. `E` and `F` enrich from there.
   (container/namespace) is a hardening item.
 - **Semantic memory.** FTS first; vector embeddings + a store is a later, dependency-heavy
   upgrade.
-- **Cross-worker protocol (Phase F).** Direct mailbox-to-mailbox messages vs. a lightweight
-  internal message bus vs. agents-as-tools handoffs — pick when we get there.
+- **Cross-worker protocol (Phase F).** Leaning toward *both*: agents-as-tools for short,
+  ephemeral delegation whose result returns to the caller's context, plus a durable task
+  table (or mailbox messages) for handoffs that must survive crashes, retry, and be
+  visible/editable by humans. Open: whether the durable path is a task board or plain
+  mailbox messages with persistence.
+- **Wiki storage.** Keep revisions in SQLite (current plan) or store wiki docs as files
+  under `<data_dir>/wiki/` and use real git for propose/approve (shell out to `git` or a
+  `git2`-style crate — new dependency).
+- **Live reload of homes.** Session-start reads are the baseline; file watching for hand
+  edits while running is deferred.
+- **Home export format.** Plain tarball of the home vs. a git repo per worker (enables
+  sharing/updating worker templates in place).
 - **Multi-provider per worker.** The engine supports it via the `Provider` trait; confirm
   whether worker config should reference a `(provider, model)` pair rather than a bare
   model string.
@@ -595,6 +720,7 @@ incoming email *and* answers questions about it. `E` and `F` enrich from there.
 | AEAD crate (e.g. `chacha20poly1305`) | encrypt credentials at rest | pending approval |
 | `tokio-cron-scheduler` or similar | pollers / scheduled triggers | pending approval |
 | React + Vite + TypeScript | web console | pending approval (separate `console/` package) |
+| `toml` | parse/write `worker.toml` | **approved** |
 
 Already in the workspace and reused: `tokio`, `reqwest`, `serde`/`serde_json`, `clap`,
 `anyhow`/`thiserror`, `async-trait`, `chrono`, `uuid`, `tracing`, `dirs`, `tokio-util`,
