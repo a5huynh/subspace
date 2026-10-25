@@ -1,22 +1,49 @@
-import { useEffect, useState } from 'react'
+import { Chat } from './components/Chat'
+import { WorkerForm } from './components/WorkerForm'
+import { WorkerList } from './components/WorkerList'
+import { href, useRoute } from './route'
+import { useWorkers } from './useWorkers'
 
-import { api } from './api/client'
-import type { Health } from './api/generated/Health'
-
-// Placeholder until the console UI lands: confirms the dev proxy reaches the server.
 export default function App() {
-  const [health, setHealth] = useState<Health | null>(null)
-  const [error, setError] = useState<string | null>(null)
+  const route = useRoute()
+  const { workers, error, refresh } = useWorkers()
+  const onChanged = refresh
 
-  useEffect(() => {
-    api.health().then(setHealth, (e: unknown) => setError(String(e)))
-  }, [])
+  let main
+  switch (route.page) {
+    case 'new':
+      main = <WorkerForm onChanged={onChanged} />
+      break
+    case 'settings':
+      main = <WorkerForm key={route.id} id={route.id} onChanged={onChanged} />
+      break
+    case 'worker': {
+      const worker = workers?.find((w) => w.id === route.id)
+      main = worker ? (
+        <Chat key={worker.id} worker={worker} />
+      ) : (
+        <section className="panel">
+          <p className="muted">{workers ? 'No such worker.' : 'Loading…'}</p>
+        </section>
+      )
+      break
+    }
+    case 'home':
+      main = (
+        <section className="panel">
+          <h2>Workers</h2>
+          <p className="muted">
+            Pick a worker on the left, or <a href={href({ page: 'new' })}>create one</a>.
+          </p>
+        </section>
+      )
+      break
+  }
 
   return (
-    <main>
-      <h1>Subspace</h1>
-      {health && <p>Server ok (epoch {health.epoch})</p>}
-      {error && <p>Can't reach subspace-server: {error}</p>}
-    </main>
+    <div className="layout">
+      <WorkerList workers={workers} error={error} route={route} />
+      <main className="main">{main}</main>
+    </div>
   )
 }
