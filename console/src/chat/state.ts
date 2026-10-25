@@ -8,6 +8,7 @@
 
 import type { AgentEvent } from '../api/generated/AgentEvent'
 import type { Message } from '../api/generated/Message'
+import type { Notice } from '../api/generated/Notice'
 import type { ServerEvent } from '../api/generated/ServerEvent'
 import type { ToolResult } from '../api/generated/ToolResult'
 import type { WorkerStatus } from '../api/generated/WorkerStatus'
@@ -18,19 +19,13 @@ export type LiveBlock =
   | { kind: 'thinking'; text: string }
   | { kind: 'tool'; id: string; name: string; args: JsonValue; partial: string }
 
-export interface Notice {
-  seq: number
-  level: 'warning' | 'error'
-  text: string
-}
-
 export interface ChatState {
   messages: Message[]
   /** The in-progress assistant turn, or null between runs. */
   live: LiveBlock[] | null
   /** Tool results seen live, until agent_end delivers the tool-result message. */
   liveResults: Record<string, ToolResult>
-  /** Errors and warnings aren't persisted, so they only live client-side. */
+  /** Run errors and warnings (persisted server-side, never sent to the model). */
   notices: Notice[]
   status: WorkerStatus | null
 }
@@ -43,8 +38,8 @@ export const emptyChat: ChatState = {
   status: null,
 }
 
-/** Append messages whose ids aren't already present, preserving order. */
-export function mergeMessages(existing: Message[], incoming: Message[]): Message[] {
+/** Append items whose ids aren't already present, preserving order. */
+export function mergeById<T extends { id: string }>(existing: T[], incoming: T[]): T[] {
   const seen = new Set(existing.map((m) => m.id))
   const added = incoming.filter((m) => !seen.has(m.id) && (seen.add(m.id), true))
   return added.length === 0 ? existing : [...existing, ...added]
@@ -52,25 +47,32 @@ export function mergeMessages(existing: Message[], incoming: Message[]): Message
 
 /** Start from fetched history. Keeps the known status; clears live state,
  * which a replay from the history cursor rebuilds. */
-export function fromHistory(prev: ChatState, messages: Message[]): ChatState {
-  return { ...emptyChat, messages: mergeMessages([], messages), status: prev.status }
+export function fromHistory(prev: ChatState, messages: Message[], notices: Notice[]): ChatState {
+  return {
+    ...emptyChat,
+    messages: mergeById([], messages),
+    notices: mergeById([], notices),
+    status: prev.status,
+  }
 }
 
 export function applyEvent(state: ChatState, event: ServerEvent): ChatState {
   const inner = event.inner
   switch (inner.type) {
     case 'user_message':
-      return { ...state, messages: mergeMessages(state.messages, [inner.data]) }
+      return { ...state, messages: mergeById(state.messages, [inner.data]) }
     case 'status_changed':
       return { ...state, status: inner.data }
+    case 'notice':
+      return { ...state, notices: mergeById(state.notices, [inner.data]) }
     case 'stimulus_received':
       return state
     case 'agent':
-      return applyAgentEvent(state, inner.data, event.seq)
+      return applyAgentEvent(state, inner.data)
   }
 }
 
-function applyAgentEvent(state: ChatState, ev: AgentEvent, seq: number): ChatState {
+function applyAgentEvent(state: ChatState, ev: AgentEvent): ChatState {
   const live = state.live ?? []
   switch (ev.type) {
     case 'agent_start':
@@ -100,17 +102,18 @@ function applyAgentEvent(state: ChatState, ev: AgentEvent, seq: number): ChatSta
       return { ...state, liveResults: { ...state.liveResults, [ev.data.id]: ev.data.result } }
     case 'turn_end':
       // The turn's assistant message is final; the next turn streams afresh.
-      return { ...state, messages: mergeMessages(state.messages, [ev.data.message]), live: [] }
+      return { ...state, messages: mergeById(state.messages, [ev.data.message]), live: [] }
     case 'agent_end':
       return {
         ...state,
-        messages: mergeMessages(state.messages, ev.data.messages),
+        messages: mergeById(state.messages, ev.data.messages),
         live: null,
         liveResults: {},
       }
     case 'warning':
     case 'error':
-      return { ...state, notices: [...state.notices, { seq, level: ev.type, text: ev.data }] }
+      // Followed by a persisted `notice` event carrying a stable id.
+      return state
   }
 }
 
@@ -138,4 +141,29 @@ export function toolResults(state: ChatState): Record<string, ToolResult> {
 /** Whether a message is only tool results (rendered inline with its tool call, not as a bubble). */
 export function isToolResultMessage(m: Message): boolean {
   return m.content.length > 0 && m.content.every((b) => b.type === 'tool_result')
+}
+
+export type TimelineItem = { kind: 'message'; message: Message } | { kind: 'notice'; notice: Notice }
+
+/**
+ * Messages in order, with each notice placed after the messages that precede
+ * it in time (so a failed run's error follows the prompt that caused it).
+ * Tool-result messages are omitted; they render inline with their tool calls.
+ */
+export function timeline(state: ChatState): TimelineItem[] {
+  const notices = [...state.notices].sort((a, b) => time(a.timestamp) - time(b.timestamp))
+  const out: TimelineItem[] = []
+  let n = 0
+  for (const message of state.messages) {
+    while (n < notices.length && time(notices[n].timestamp) < time(message.timestamp)) {
+      out.push({ kind: 'notice', notice: notices[n++] })
+    }
+    if (!isToolResultMessage(message)) out.push({ kind: 'message', message })
+  }
+  while (n < notices.length) out.push({ kind: 'notice', notice: notices[n++] })
+  return out
+}
+
+function time(ts: string): number {
+  return Date.parse(ts)
 }

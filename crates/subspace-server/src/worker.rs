@@ -9,7 +9,7 @@ use tokio::sync::mpsc;
 use ts_rs::TS;
 
 use crate::WorkerId;
-use crate::event::{EventLog, WorkerEvent};
+use crate::event::{EventLog, Notice, NoticeLevel, WorkerEvent};
 use crate::skills::SkillSelection;
 use crate::store::SqliteStore;
 
@@ -107,7 +107,21 @@ pub(crate) async fn run_worker(
                     {
                         tracing::warn!("failed to persist agent messages: {e}");
                     }
+                    let notice = match &ev {
+                        AgentEvent::Error(text) => Some(Notice::new(NoticeLevel::Error, text)),
+                        AgentEvent::Warning(text) => Some(Notice::new(NoticeLevel::Warning, text)),
+                        _ => None,
+                    };
                     log.emit(WorkerEvent::Agent(ev));
+                    if let Some(notice) = notice {
+                        // Persisted so a reload still explains a failed run.
+                        if let Some(store) = &store
+                            && let Err(e) = store.append_notice(&id, &notice).await
+                        {
+                            tracing::warn!("failed to persist notice: {e}");
+                        }
+                        log.emit(WorkerEvent::Notice(notice));
+                    }
                 }
                 let _ = handle.await;
 

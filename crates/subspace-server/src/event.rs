@@ -5,7 +5,7 @@ use std::collections::VecDeque;
 use std::sync::Mutex;
 
 use chrono::{DateTime, Utc};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use subspace::agent::AgentEvent;
 use subspace::types::Message;
 use tokio::sync::broadcast;
@@ -40,8 +40,40 @@ pub enum WorkerEvent {
     UserMessage(Message),
     /// A streamed event from the underlying engine agent loop.
     Agent(AgentEvent),
+    /// A run error or warning, persisted so it survives reloads. Carries a
+    /// stable id so clients can merge it with fetched history.
+    Notice(Notice),
     /// The worker's status changed.
     StatusChanged(WorkerStatus),
+}
+
+/// How serious a [`Notice`] is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "snake_case")]
+pub enum NoticeLevel {
+    Warning,
+    Error,
+}
+
+/// An error or warning from a worker run (e.g. a provider failure). Shown to
+/// humans alongside the conversation, but never sent to the model.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+pub struct Notice {
+    pub id: String,
+    pub level: NoticeLevel,
+    pub text: String,
+    pub timestamp: DateTime<Utc>,
+}
+
+impl Notice {
+    pub fn new(level: NoticeLevel, text: impl Into<String>) -> Self {
+        Self {
+            id: subspace::types::new_id(),
+            level,
+            text: text.into(),
+            timestamp: Utc::now(),
+        }
+    }
 }
 
 /// What a new stream subscriber should do before consuming live events.

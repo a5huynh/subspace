@@ -2,14 +2,17 @@ import { useEffect, useReducer, useState } from 'react'
 
 import { api, openWorkerStream } from '../api/client'
 import type { Message } from '../api/generated/Message'
+import type { Notice } from '../api/generated/Notice'
 import type { ServerEvent } from '../api/generated/ServerEvent'
 import { applyEvent, emptyChat, fromHistory, type ChatState } from './state'
 
-type Action = { type: 'history'; messages: Message[] } | { type: 'event'; event: ServerEvent }
+type Action =
+  | { type: 'history'; messages: Message[]; notices: Notice[] }
+  | { type: 'event'; event: ServerEvent }
 
 function reducer(state: ChatState, action: Action): ChatState {
   return action.type === 'history'
-    ? fromHistory(state, action.messages)
+    ? fromHistory(state, action.messages, action.notices)
     : applyEvent(state, action.event)
 }
 
@@ -37,7 +40,7 @@ export function useWorkerChat(id: string) {
         const history = await api.history(id)
         if (cancelled) return
         setError(null)
-        dispatch({ type: 'history', messages: history.messages })
+        dispatch({ type: 'history', messages: history.messages, notices: history.notices })
         close = openWorkerStream(id, history, {
           onEvent: (event) => dispatch({ type: 'event', event }),
           onResync: () => void load(),

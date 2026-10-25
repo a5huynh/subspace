@@ -2,7 +2,7 @@ import { useEffect, useLayoutEffect, useRef, useState, type KeyboardEvent } from
 
 import { api } from '../api/client'
 import type { WorkerSummary } from '../api/generated/WorkerSummary'
-import { isToolResultMessage, toolResults } from '../chat/state'
+import { timeline, toolResults } from '../chat/state'
 import { useWorkerChat } from '../chat/useWorkerChat'
 import { href } from '../route'
 import { LiveView, MessageView } from './MessageView'
@@ -37,17 +37,16 @@ export function Chat({ worker }: { worker: WorkerSummary }) {
         {state.messages.length === 0 && !state.live && (
           <p className="muted empty">Say hello to {worker.name}.</p>
         )}
-        {state.messages
-          .filter((m) => !isToolResultMessage(m))
-          .map((m) => (
-            <MessageView key={m.id} message={m} results={results} />
-          ))}
+        {timeline(state).map((item) =>
+          item.kind === 'message' ? (
+            <MessageView key={item.message.id} message={item.message} results={results} />
+          ) : (
+            <p key={item.notice.id} className={`notice notice-${item.notice.level}`}>
+              {item.notice.text}
+            </p>
+          ),
+        )}
         {state.live && <LiveView blocks={state.live} results={results} />}
-        {state.notices.map((n) => (
-          <p key={n.seq} className={`notice notice-${n.level}`}>
-            {n.text}
-          </p>
-        ))}
       </div>
 
       <Composer workerId={worker.id} busy={status?.state === 'running'} />

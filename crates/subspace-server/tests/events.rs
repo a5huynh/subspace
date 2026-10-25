@@ -224,3 +224,55 @@ async fn update_errors_are_typed() {
         Some(ManagerError::AlreadyExists(_))
     ));
 }
+
+#[tokio::test]
+async fn run_errors_are_persisted_as_notices_but_never_sent_to_the_model() {
+    let provider = Arc::new(common::FlakyProvider::new(1, "recovered"));
+    let data = std::env::temp_dir().join(format!("subspace_events_test_{}", new_id()));
+    fs::create_dir_all(&data).unwrap();
+    let store = Arc::new(SqliteStore::connect("sqlite::memory:").await.unwrap());
+    let manager = WorkerManager::with_persistence(
+        provider.clone(),
+        store.clone(),
+        Homes::open(&data).unwrap(),
+    );
+    let id = manager
+        .spawn(WorkerConfig::new("Secretary", "role"))
+        .await
+        .unwrap();
+
+    // First run fails at the provider.
+    prompt_and_wait(&manager, &id, "first").await;
+    let history = manager.history(&id).await.unwrap();
+    assert_eq!(history.notices.len(), 1);
+    let notice = &history.notices[0];
+    assert_eq!(notice.level, subspace_server::NoticeLevel::Error);
+    assert!(notice.text.contains("provider exploded"), "{}", notice.text);
+    assert_eq!(history.messages.len(), 1, "only the user message");
+
+    // The same notice (same id) was streamed live.
+    let Replay::Events(events) = manager.subscribe_worker(&id, 0).unwrap().0 else {
+        panic!("gap");
+    };
+    let streamed: Vec<_> = events
+        .iter()
+        .filter_map(|e| match &e.inner {
+            WorkerEvent::Notice(n) => Some(n.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(streamed, history.notices);
+
+    // The next run succeeds, and the model never sees the notice.
+    prompt_and_wait(&manager, &id, "second").await;
+    let request = provider.inner.requests().pop().unwrap();
+    let transcript = serde_json::to_string(&request.messages).unwrap();
+    assert!(!transcript.contains("provider exploded"), "{transcript}");
+    assert!(transcript.contains("first") && transcript.contains("second"));
+
+    // Deleting the worker deletes its notices too.
+    manager.remove(&id).await.unwrap();
+    assert!(store.load_notices(&id).await.unwrap().is_empty());
+
+    let _ = fs::remove_dir_all(&data);
+}

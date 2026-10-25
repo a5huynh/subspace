@@ -17,7 +17,7 @@ use tokio::task::JoinHandle;
 use ts_rs::TS;
 
 use crate::WorkerId;
-use crate::event::{EventLog, Replay, ServerEvent};
+use crate::event::{EventLog, Notice, Replay, ServerEvent};
 use crate::home::Homes;
 use crate::home_tools::{HomeScope, home_tools};
 use crate::skills::{self, Skill, SkillSource};
@@ -79,10 +79,13 @@ pub struct History {
     /// must resync.
     pub epoch: String,
     /// Resume the event stream with `since = cursor`. Taken *before* reading
-    /// messages, so replayed events may repeat messages already listed here;
-    /// clients merge by message id.
+    /// messages, so replayed events may repeat messages (and notices) already
+    /// listed here; clients merge by id.
     pub cursor: u64,
     pub messages: Vec<Message>,
+    /// Run errors and warnings, oldest first. Not part of the model's context;
+    /// clients interleave them with `messages` by timestamp.
+    pub notices: Vec<Notice>,
 }
 
 /// Owns and supervises the lifecycle of all workers.
@@ -373,14 +376,18 @@ impl WorkerManager {
         // Cursor first: anything that lands in between is replayed (and
         // deduplicated by id) rather than lost.
         let cursor = self.log(id)?.cursor();
-        let messages = match &self.persistence {
-            Some(p) => p.store.load_history(id).await?,
-            None => Vec::new(),
+        let (messages, notices) = match &self.persistence {
+            Some(p) => (
+                p.store.load_history(id).await?,
+                p.store.load_notices(id).await?,
+            ),
+            None => (Vec::new(), Vec::new()),
         };
         Ok(History {
             epoch: self.epoch.clone(),
             cursor,
             messages,
+            notices,
         })
     }
 

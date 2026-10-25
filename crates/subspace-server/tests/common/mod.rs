@@ -55,6 +55,49 @@ impl Provider for CapturingProvider {
     }
 }
 
+/// Fails the first `failures` completions with "provider exploded", then
+/// delegates to a [`CapturingProvider`].
+pub struct FlakyProvider {
+    pub inner: CapturingProvider,
+    failures: Mutex<usize>,
+}
+
+impl FlakyProvider {
+    pub fn new(failures: usize, then: &str) -> Self {
+        Self {
+            inner: CapturingProvider::with_text(then),
+            failures: Mutex::new(failures),
+        }
+    }
+}
+
+impl Provider for FlakyProvider {
+    fn name(&self) -> &str {
+        "flaky"
+    }
+
+    fn complete<'a, 'b>(
+        &'a self,
+        request: CompletionRequest,
+    ) -> Pin<Box<dyn Future<Output = anyhow::Result<CompletionStream>> + Send + 'b>>
+    where
+        'a: 'b,
+        Self: 'b,
+    {
+        let failing = {
+            let mut left = self.failures.lock().unwrap();
+            let failing = *left > 0;
+            *left = left.saturating_sub(1);
+            failing
+        };
+        if failing {
+            Box::pin(async { Err(anyhow::anyhow!("provider exploded")) })
+        } else {
+            self.inner.complete(request)
+        }
+    }
+}
+
 /// Holds every completion until [`GatedProvider::release`] is called, so a
 /// test can observe a worker mid-run.
 pub struct GatedProvider {

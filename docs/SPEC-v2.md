@@ -522,7 +522,9 @@ struct ServerEvent {
 
 enum WorkerEvent {
     StimulusReceived(StimulusSummary),           // "got prompt" / "got email.received"
+    UserMessage(Message),                        // persisted prompt, with its stable id
     Agent(AgentEvent),                           // engine events (text, tool calls, ...)
+    Notice(Notice),                              // persisted run error/warning, with its id
     ApprovalRequired { action_id: Id, tool: String, args: serde_json::Value },
     ActionResolved { action_id: Id, approved: bool },
     StatusChanged(WorkerStatus),
@@ -641,6 +643,7 @@ for wiring and state.
 | `messages` | id, worker_id, role, content(json), ts — conversation history |
 | `memory_notes` | id, worker_id, path, text, tags(json), ts — FTS5 **index** over `memory/*.md` |
 | `compactions` | id, worker_id, summary, through_seq, ts |
+| `notices` | id, worker_id, level (warning/error), text, created_at; run errors shown to humans, never sent to the model |
 | `wiki_docs` | path, title, current_rev |
 | `wiki_revisions` | id, path, content, author (worker/human), status(proposed/approved), ts |
 | `credentials` | worker_id, integration, ciphertext, nonce |

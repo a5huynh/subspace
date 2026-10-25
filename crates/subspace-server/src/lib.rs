@@ -18,7 +18,7 @@ pub mod worker;
 /// Stable identifier for a worker (UUID-v4 string, from the engine).
 pub type WorkerId = subspace::types::Id;
 
-pub use event::{Replay, ServerEvent, WorkerEvent};
+pub use event::{Notice, NoticeLevel, Replay, ServerEvent, WorkerEvent};
 pub use home::{HomeListing, Homes};
 pub use manager::{History, ManagerError, WorkerManager, WorkerSummary};
 pub use store::{SqliteStore, WorkerIndexEntry};
