@@ -617,7 +617,8 @@ for wiring and state.
 
 | Table | Key columns |
 |-------|-------------|
-| `workers` | id, name, description, home_path, status, created_at — **index** rebuilt from homes |
+| `workers` | id, name, description, home_path, created_at — **index** rebuilt from homes (status is runtime-only) |
+| `legacy_workers` | A3 rows awaiting migration into homes (Phase A4 step 3) |
 | `worker_integrations` | worker_id, integration, credential_ref |
 | `subscriptions` | id, worker_id, integration, event_kind, filter(json) |
 | `messages` | id, worker_id, role, content(json), ts — conversation history |

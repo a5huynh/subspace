@@ -64,3 +64,17 @@ async fn manager_tracks_and_shuts_down_workers() {
     // Delivering to a removed worker is an error, not a panic.
     assert!(manager.deliver(&id, Stimulus::Shutdown).await.is_err());
 }
+
+#[tokio::test]
+async fn spawning_a_duplicate_id_is_rejected() {
+    let provider: Arc<dyn Provider> = Arc::new(MockProvider::with_text("ok"));
+    let manager = WorkerManager::new(provider);
+
+    let cfg = WorkerConfig::new("Worker A", "role");
+    manager.spawn(cfg.clone()).await.unwrap();
+    assert!(manager.spawn(cfg.clone()).await.is_err());
+    assert_eq!(manager.list().len(), 1);
+
+    // The original worker is still alive and reachable.
+    manager.shutdown(&cfg.id).await.unwrap();
+}

@@ -16,5 +16,5 @@ pub type WorkerId = subspace::types::Id;
 pub use event::{ServerEvent, WorkerEvent};
 pub use home::{HomeListing, Homes};
 pub use manager::{WorkerManager, WorkerSummary};
-pub use store::SqliteStore;
+pub use store::{SqliteStore, WorkerIndexEntry};
 pub use worker::{Stimulus, WorkerConfig, WorkerStatus};

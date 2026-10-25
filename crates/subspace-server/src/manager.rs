@@ -1,6 +1,6 @@
 //! The Worker Manager: lifecycle for all workers (spawn, deliver, list, shutdown).
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::AtomicU64;
 use std::sync::{Arc, Mutex};
 
@@ -8,11 +8,13 @@ use anyhow::{Result, anyhow};
 use subspace::agent::{Agent, AgentConfig};
 use subspace::provider::Provider;
 use subspace::tools::ToolRegistry;
+use subspace::types::Message;
 use tokio::sync::{broadcast, mpsc};
 use tokio::task::JoinHandle;
 
 use crate::WorkerId;
 use crate::event::ServerEvent;
+use crate::home::Homes;
 use crate::store::SqliteStore;
 use crate::worker::{Stimulus, WorkerConfig, WorkerStatus, run_worker};
 
@@ -24,6 +26,12 @@ struct WorkerHandle {
     tx: mpsc::Sender<Stimulus>,
     status: Arc<Mutex<WorkerStatus>>,
     task: JoinHandle<()>,
+}
+
+/// Where workers persist: identity in homes, index + history in SQLite.
+struct Persistence {
+    store: Arc<SqliteStore>,
+    homes: Homes,
 }
 
 /// A lightweight view of a worker for listing.
@@ -39,7 +47,7 @@ pub struct WorkerManager {
     provider: Arc<dyn Provider>,
     events: broadcast::Sender<ServerEvent>,
     workers: Mutex<HashMap<WorkerId, WorkerHandle>>,
-    store: Option<Arc<SqliteStore>>,
+    persistence: Option<Persistence>,
 }
 
 impl WorkerManager {
@@ -48,18 +56,23 @@ impl WorkerManager {
         Self::build(provider, None)
     }
 
-    /// Create a manager backed by a persistent store.
-    pub fn with_store(provider: Arc<dyn Provider>, store: Arc<SqliteStore>) -> Self {
-        Self::build(provider, Some(store))
+    /// Create a manager that keeps worker identity in `homes` and the worker
+    /// index + history in `store`.
+    pub fn with_persistence(
+        provider: Arc<dyn Provider>,
+        store: Arc<SqliteStore>,
+        homes: Homes,
+    ) -> Self {
+        Self::build(provider, Some(Persistence { store, homes }))
     }
 
-    fn build(provider: Arc<dyn Provider>, store: Option<Arc<SqliteStore>>) -> Self {
+    fn build(provider: Arc<dyn Provider>, persistence: Option<Persistence>) -> Self {
         let (events, _) = broadcast::channel(EVENT_BUS_CAPACITY);
         Self {
             provider,
             events,
             workers: Mutex::new(HashMap::new()),
-            store,
+            persistence,
         }
     }
 
@@ -68,25 +81,71 @@ impl WorkerManager {
         self.events.subscribe()
     }
 
-    /// Restore persisted workers from the store. Returns how many were restored.
+    /// Rebuild the index from homes and start every worker found there.
+    /// Returns how many workers were started.
+    ///
+    /// Broken homes are logged and skipped. Index entries whose home is gone
+    /// are dropped (their history is kept). Already-running workers are left
+    /// alone, so calling this twice is harmless.
     pub async fn boot(&self) -> Result<usize> {
-        let configs = match &self.store {
-            Some(store) => store.list_workers().await?,
-            None => return Ok(0),
+        let Some(p) = &self.persistence else {
+            return Ok(0);
         };
-        let count = configs.len();
-        for cfg in configs {
-            self.spawn_inner(cfg, true).await?;
+
+        let listing = p.homes.list()?;
+        for (id, err) in &listing.invalid {
+            tracing::warn!("skipping worker home '{id}': {err:#}");
         }
-        Ok(count)
+
+        let on_disk: HashSet<&str> = listing
+            .workers
+            .iter()
+            .map(|w| w.id.as_str())
+            .chain(listing.invalid.iter().map(|(id, _)| id.as_str()))
+            .collect();
+        for entry in p.store.list_index().await? {
+            if !on_disk.contains(entry.id.as_str()) {
+                tracing::warn!(
+                    "worker '{}' ({}) has no home at {}; dropping it from the index",
+                    entry.id,
+                    entry.name,
+                    entry.home_path
+                );
+                p.store.remove_index(&entry.id).await?;
+            }
+        }
+
+        let mut started = 0;
+        for cfg in listing.workers {
+            if self.workers.lock().unwrap().contains_key(&cfg.id) {
+                continue;
+            }
+            p.store.upsert_index(&cfg, &p.homes.path(&cfg.id)?).await?;
+            let history = p.store.load_history(&cfg.id).await?;
+            self.start(cfg, history).await?;
+            started += 1;
+        }
+        Ok(started)
     }
 
-    /// Create and start a new worker, persisting it if a store is configured.
+    /// Create and start a new worker. With persistence, its home is created
+    /// first and then indexed.
     pub async fn spawn(&self, config: WorkerConfig) -> Result<WorkerId> {
-        self.spawn_inner(config, false).await
+        if self.workers.lock().unwrap().contains_key(&config.id) {
+            return Err(anyhow!("worker '{}' is already running", config.id));
+        }
+        if let Some(p) = &self.persistence {
+            let home = p.homes.create(&config)?;
+            if let Err(e) = p.store.upsert_index(&config, &home).await {
+                let _ = p.homes.remove(&config.id);
+                return Err(e);
+            }
+        }
+        self.start(config, Vec::new()).await
     }
 
-    async fn spawn_inner(&self, config: WorkerConfig, restore: bool) -> Result<WorkerId> {
+    /// Build the engine agent and register the worker's runtime loop.
+    async fn start(&self, config: WorkerConfig, history: Vec<Message>) -> Result<WorkerId> {
         let id = config.id.clone();
 
         let agent_config = AgentConfig {
@@ -97,16 +156,15 @@ impl WorkerManager {
         };
         // Phase A workers have no tools yet — integrations arrive in Phase C.
         let agent = Agent::new(agent_config, self.provider.clone(), ToolRegistry::new());
+        if !history.is_empty() {
+            agent.replace_messages(history).await;
+        }
 
-        if let Some(store) = &self.store {
-            if restore {
-                let history = store.load_history(&id).await?;
-                if !history.is_empty() {
-                    agent.replace_messages(history).await;
-                }
-            } else {
-                store.save_worker(&config).await?;
-            }
+        // Check and register under one lock so a duplicate id can never leave
+        // an orphaned task running.
+        let mut workers = self.workers.lock().unwrap();
+        if workers.contains_key(&id) {
+            return Err(anyhow!("worker '{id}' is already running"));
         }
 
         let (tx, mailbox) = mpsc::channel(MAILBOX_CAPACITY);
@@ -120,16 +178,18 @@ impl WorkerManager {
             self.events.clone(),
             status.clone(),
             seq,
-            self.store.clone(),
+            self.persistence.as_ref().map(|p| p.store.clone()),
         ));
 
-        let handle = WorkerHandle {
-            config,
-            tx,
-            status,
-            task,
-        };
-        self.workers.lock().unwrap().insert(id.clone(), handle);
+        workers.insert(
+            id.clone(),
+            WorkerHandle {
+                config,
+                tx,
+                status,
+                task,
+            },
+        );
         Ok(id)
     }
 
@@ -176,12 +236,35 @@ impl WorkerManager {
 
     /// Stop a worker's task and remove it from the in-memory set.
     ///
-    /// The worker remains persisted in the store and can be restored via [`Self::boot`].
+    /// The worker remains persisted and can be restored via [`Self::boot`].
     pub async fn shutdown(&self, id: &str) -> Result<()> {
         self.deliver(id, Stimulus::Shutdown).await?;
         let handle = self.workers.lock().unwrap().remove(id);
         if let Some(h) = handle {
             let _ = h.task.await;
+        }
+        Ok(())
+    }
+
+    /// Permanently delete a worker: stop it, drop its index entry and history,
+    /// then delete its home. Database first, so a failure mid-way leaves only
+    /// an orphaned (harmless) home directory.
+    pub async fn remove(&self, id: &str) -> Result<()> {
+        let running = self.workers.lock().unwrap().contains_key(id);
+        let has_home = match &self.persistence {
+            Some(p) => p.homes.exists(id)?,
+            None => false,
+        };
+        if !running && !has_home {
+            return Err(anyhow!("no such worker: {id}"));
+        }
+
+        if running {
+            self.shutdown(id).await?;
+        }
+        if let Some(p) = &self.persistence {
+            p.store.delete_worker(id).await?;
+            p.homes.remove(id)?;
         }
         Ok(())
     }

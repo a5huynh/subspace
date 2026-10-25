@@ -1,5 +1,9 @@
-//! SQLite persistence for workers and message history.
+//! SQLite persistence for the worker index and message history.
+//!
+//! Worker identity lives in on-disk homes ([`crate::home`]); the `workers`
+//! table is only an index of them.
 
+use std::path::Path;
 use std::str::FromStr;
 
 use anyhow::Result;
@@ -9,6 +13,16 @@ use sqlx::sqlite::{SqliteConnectOptions, SqlitePool, SqlitePoolOptions};
 use subspace::types::Message;
 
 use crate::worker::WorkerConfig;
+
+/// One row of the worker index.
+#[derive(Debug, Clone)]
+pub struct WorkerIndexEntry {
+    pub id: String,
+    pub name: String,
+    pub description: String,
+    pub home_path: String,
+    pub created_at: String,
+}
 
 /// SQLite-backed store. Cheap to clone (the pool is reference-counted).
 pub struct SqliteStore {
@@ -32,50 +46,57 @@ impl SqliteStore {
         Ok(Self { pool })
     }
 
-    /// Insert or update a worker's configuration.
-    pub async fn save_worker(&self, cfg: &WorkerConfig) -> Result<()> {
+    /// Insert or refresh a worker's index entry from its home config.
+    /// `created_at` is set on first insert and preserved afterwards.
+    pub async fn upsert_index(&self, cfg: &WorkerConfig, home_path: &Path) -> Result<()> {
         sqlx::query(
-            "INSERT INTO workers (id, name, role, model, thinking, created_at)
-             VALUES (?, ?, ?, ?, ?, ?)
+            "INSERT INTO workers (id, name, description, home_path, created_at)
+             VALUES (?, ?, ?, ?, ?)
              ON CONFLICT(id) DO UPDATE SET
                  name = excluded.name,
-                 role = excluded.role,
-                 model = excluded.model,
-                 thinking = excluded.thinking",
+                 description = excluded.description,
+                 home_path = excluded.home_path",
         )
         .bind(&cfg.id)
         .bind(&cfg.name)
-        .bind(&cfg.role)
-        .bind(&cfg.model)
-        .bind(serde_json::to_string(&cfg.thinking)?)
+        .bind(&cfg.description)
+        .bind(home_path.to_string_lossy().as_ref())
         .bind(Utc::now().to_rfc3339())
         .execute(&self.pool)
         .await?;
         Ok(())
     }
 
-    /// Load all persisted worker configs, oldest first.
-    pub async fn list_workers(&self) -> Result<Vec<WorkerConfig>> {
-        let rows =
-            sqlx::query("SELECT id, name, role, model, thinking FROM workers ORDER BY created_at")
-                .fetch_all(&self.pool)
-                .await?;
-        let mut out = Vec::with_capacity(rows.len());
-        for row in rows {
-            let thinking_s: String = row.get("thinking");
-            out.push(WorkerConfig {
+    /// All index entries, oldest first.
+    pub async fn list_index(&self) -> Result<Vec<WorkerIndexEntry>> {
+        let rows = sqlx::query(
+            "SELECT id, name, description, home_path, created_at FROM workers
+             ORDER BY created_at, id",
+        )
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows
+            .into_iter()
+            .map(|row| WorkerIndexEntry {
                 id: row.get("id"),
                 name: row.get("name"),
-                description: String::new(),
-                role: row.get("role"),
-                model: row.get("model"),
-                thinking: serde_json::from_str(&thinking_s)?,
-            });
-        }
-        Ok(out)
+                description: row.get("description"),
+                home_path: row.get("home_path"),
+                created_at: row.get("created_at"),
+            })
+            .collect())
     }
 
-    /// Remove a worker and its history.
+    /// Drop a worker's index entry only; its history is kept.
+    pub async fn remove_index(&self, id: &str) -> Result<()> {
+        sqlx::query("DELETE FROM workers WHERE id = ?")
+            .bind(id)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    /// Remove a worker's index entry and its history.
     pub async fn delete_worker(&self, id: &str) -> Result<()> {
         sqlx::query("DELETE FROM messages WHERE worker_id = ?")
             .bind(id)
