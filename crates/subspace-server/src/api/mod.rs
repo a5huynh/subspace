@@ -1,6 +1,7 @@
 //! HTTP API for the console: REST management under `/api`, plus the worker
 //! event stream (WebSocket). Errors are always JSON: `{"error": "..."}`.
 
+mod stream;
 mod workers;
 
 use std::sync::Arc;
@@ -15,6 +16,7 @@ use ts_rs::TS;
 
 use crate::manager::{ManagerError, WorkerManager};
 
+pub use stream::StreamMessage;
 pub use workers::{CreateWorker, PromptRequest, UpdateWorker, WorkerDetail};
 
 /// Shared state for all handlers.
@@ -24,6 +26,7 @@ pub type AppState = Arc<WorkerManager>;
 pub fn router(manager: Arc<WorkerManager>) -> Router {
     Router::new()
         .route("/api/health", get(health))
+        .route("/api/workers/{id}/stream", get(stream::stream))
         .merge(workers::routes())
         .with_state(manager)
 }

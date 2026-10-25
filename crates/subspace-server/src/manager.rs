@@ -361,6 +361,12 @@ impl WorkerManager {
         out
     }
 
+    /// The cursor a fresh stream subscriber should start from (see
+    /// [`EventLog::cursor`]), or `None` if the worker isn't running.
+    pub fn history_cursor(&self, id: &str) -> Option<u64> {
+        self.log(id).ok().map(|log| log.cursor())
+    }
+
     /// A worker's persisted messages and the cursor to resume its stream from.
     /// In-memory workers have no persisted messages.
     pub async fn history(&self, id: &str) -> Result<History> {

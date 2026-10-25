@@ -36,3 +36,4 @@ tracing = "0.1"
 # Black-box API tests against a real server on a random port
 reqwest = { version = "0.12", features = ["json"] }
 tokio-tungstenite = "0.29"  # match axum's, to avoid two copies
+futures-util = "0.3"  # StreamExt for reading tokio-tungstenite frames
