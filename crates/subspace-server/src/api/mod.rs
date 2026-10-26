@@ -75,8 +75,16 @@ impl ApiError {
 impl From<anyhow::Error> for ApiError {
     fn from(err: anyhow::Error) -> Self {
         let status = match err.downcast_ref::<ManagerError>() {
-            Some(ManagerError::NotFound(_)) => StatusCode::NOT_FOUND,
-            Some(ManagerError::AlreadyExists(_) | ManagerError::Busy(_)) => StatusCode::CONFLICT,
+            Some(
+                ManagerError::NotFound(_)
+                | ManagerError::NoSuchWorkspace(_)
+                | ManagerError::NoSuchChannel(_),
+            ) => StatusCode::NOT_FOUND,
+            Some(
+                ManagerError::AlreadyExists(_) | ManagerError::Busy(_) | ManagerError::Conflict(_),
+            ) => StatusCode::CONFLICT,
+            Some(ManagerError::Invalid(_)) => StatusCode::BAD_REQUEST,
+            Some(ManagerError::Unsupported(_)) => StatusCode::NOT_IMPLEMENTED,
             None => {
                 tracing::error!("api error: {err:#}");
                 StatusCode::INTERNAL_SERVER_ERROR

@@ -98,6 +98,93 @@ impl Provider for FlakyProvider {
     }
 }
 
+/// Answers each completion with `script(request)`, so replies can depend on
+/// who is asked (system prompt) and what (last user message). Records requests.
+pub struct ScriptedProvider {
+    script: Box<dyn Fn(&CompletionRequest) -> String + Send + Sync>,
+    requests: Mutex<Vec<CompletionRequest>>,
+}
+
+impl ScriptedProvider {
+    pub fn new(script: impl Fn(&CompletionRequest) -> String + Send + Sync + 'static) -> Self {
+        Self {
+            script: Box::new(script),
+            requests: Mutex::new(Vec::new()),
+        }
+    }
+
+    pub fn requests(&self) -> Vec<CompletionRequest> {
+        self.requests.lock().unwrap().clone()
+    }
+
+    /// Requests made by the worker whose system prompt starts with `role`.
+    pub fn requests_from(&self, role: &str) -> Vec<CompletionRequest> {
+        self.requests()
+            .into_iter()
+            .filter(|r| r.system_prompt.as_deref().unwrap_or("").starts_with(role))
+            .collect()
+    }
+}
+
+impl Provider for ScriptedProvider {
+    fn name(&self) -> &str {
+        "scripted"
+    }
+
+    fn complete<'a, 'b>(
+        &'a self,
+        request: CompletionRequest,
+    ) -> Pin<Box<dyn Future<Output = anyhow::Result<CompletionStream>> + Send + 'b>>
+    where
+        'a: 'b,
+        Self: 'b,
+    {
+        self.requests.lock().unwrap().push(request.clone());
+        let reply = (self.script)(&request);
+        Box::pin(async move { MockProvider::with_text(reply).complete(request).await })
+    }
+}
+
+/// The text of a request's last user message.
+pub fn last_user_text(request: &CompletionRequest) -> String {
+    request
+        .messages
+        .iter()
+        .rev()
+        .find(|m| m.role == subspace::types::Role::User)
+        .map(|m| m.text())
+        .unwrap_or_default()
+}
+
+/// Wait until `channel` has at least `posts` posts and every worker is idle.
+pub async fn settle(manager: &WorkerManager, channel: &str, posts: usize) {
+    let hub = manager.channels().unwrap();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let count = hub.posts(channel).await.unwrap().len();
+            let idle = manager
+                .list()
+                .iter()
+                .all(|w| w.status == WorkerStatus::Idle);
+            if count >= posts && idle {
+                // Let any just-queued turn start before declaring quiet.
+                tokio::time::sleep(Duration::from_millis(30)).await;
+                if manager
+                    .list()
+                    .iter()
+                    .all(|w| w.status == WorkerStatus::Idle)
+                    && hub.posts(channel).await.unwrap().len() == count
+                {
+                    return;
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("timed out waiting for the channel to settle");
+}
+
 /// Holds every completion until [`GatedProvider::release`] is called, so a
 /// test can observe a worker mid-run.
 pub struct GatedProvider {

@@ -10,6 +10,8 @@ use ts_rs::TS;
 
 use crate::WorkerId;
 
+pub mod hub;
+
 pub type WorkspaceId = String;
 pub type ChannelId = String;
 

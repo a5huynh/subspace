@@ -17,12 +17,13 @@ use tokio::task::JoinHandle;
 use ts_rs::TS;
 
 use crate::WorkerId;
+use crate::channel::hub::ChannelHub;
 use crate::event::{EventLog, Notice, Replay, ServerEvent};
 use crate::home::Homes;
 use crate::home_tools::{HomeScope, home_tools};
 use crate::skills::{self, Skill, SkillSource};
 use crate::store::SqliteStore;
-use crate::worker::{Stimulus, WorkerConfig, WorkerStatus, run_worker};
+use crate::worker::{Runtime, Stimulus, WorkerConfig, WorkerStatus, run_worker};
 
 const EVENT_BUS_CAPACITY: usize = 1024;
 const MAILBOX_CAPACITY: usize = 64;
@@ -35,6 +36,14 @@ pub enum ManagerError {
     AlreadyExists(WorkerId),
     /// The worker is mid-run; retry once it is idle.
     Busy(WorkerId),
+    NoSuchWorkspace(String),
+    NoSuchChannel(String),
+    /// The request clashes with existing state (e.g. a taken name).
+    Conflict(String),
+    /// The request is malformed or not allowed (e.g. an empty post).
+    Invalid(String),
+    /// The feature needs persistence, which this manager doesn't have.
+    Unsupported(String),
 }
 
 impl fmt::Display for ManagerError {
@@ -43,6 +52,9 @@ impl fmt::Display for ManagerError {
             Self::NotFound(id) => write!(f, "no such worker: {id}"),
             Self::AlreadyExists(id) => write!(f, "worker '{id}' already exists"),
             Self::Busy(id) => write!(f, "worker '{id}' is busy; try again when it is idle"),
+            Self::NoSuchWorkspace(id) => write!(f, "no such workspace: {id}"),
+            Self::NoSuchChannel(id) => write!(f, "no such channel: {id}"),
+            Self::Conflict(msg) | Self::Invalid(msg) | Self::Unsupported(msg) => f.write_str(msg),
         }
     }
 }
@@ -94,6 +106,8 @@ pub struct WorkerManager {
     events: broadcast::Sender<ServerEvent>,
     workers: Mutex<HashMap<WorkerId, WorkerHandle>>,
     persistence: Option<Persistence>,
+    /// Workspaces and channels; needs persistence.
+    hub: Option<Arc<ChannelHub>>,
     /// Random per-process id; event `seq`s are only comparable within one.
     epoch: String,
 }
@@ -116,13 +130,24 @@ impl WorkerManager {
 
     fn build(provider: Arc<dyn Provider>, persistence: Option<Persistence>) -> Self {
         let (events, _) = broadcast::channel(EVENT_BUS_CAPACITY);
+        let hub = persistence
+            .as_ref()
+            .map(|p| Arc::new(ChannelHub::new(p.store.clone())));
         Self {
             provider,
             events,
             workers: Mutex::new(HashMap::new()),
             persistence,
+            hub,
             epoch: new_id(),
         }
+    }
+
+    /// Workspaces and channels. Only available with persistence.
+    pub fn channels(&self) -> Result<&Arc<ChannelHub>> {
+        self.hub.as_ref().ok_or_else(|| {
+            ManagerError::Unsupported("channels need a persistent server".into()).into()
+        })
     }
 
     /// This process's epoch (see [`History::epoch`]).
@@ -159,6 +184,7 @@ impl WorkerManager {
         };
 
         migrate_legacy_workers(p).await?;
+        let default_workspace = p.store.ensure_default_workspace().await?;
 
         let listing = p.homes.list()?;
         for (id, err) in &listing.invalid {
@@ -189,6 +215,11 @@ impl WorkerManager {
                 continue;
             }
             p.store.upsert_index(&cfg, &p.homes.path(&cfg.id)?).await?;
+            if p.store.worker_workspaces(&cfg.id).await?.is_empty() {
+                p.store
+                    .add_workspace_member(&default_workspace.id, &cfg.id)
+                    .await?;
+            }
             let history = p.store.load_history(&cfg.id).await?;
             self.start(cfg, history, None).await?;
             started += 1;
@@ -209,7 +240,14 @@ impl WorkerManager {
         }
         if let Some(p) = &self.persistence {
             let home = p.homes.create(&config)?;
-            if let Err(e) = p.store.upsert_index(&config, &home).await {
+            let indexed = async {
+                p.store.upsert_index(&config, &home).await?;
+                let workspace = p.store.ensure_default_workspace().await?;
+                p.store
+                    .add_workspace_member(&workspace.id, &config.id)
+                    .await
+            };
+            if let Err(e) = indexed.await {
                 let _ = p.homes.remove(&config.id);
                 return Err(e);
             }
@@ -250,14 +288,18 @@ impl WorkerManager {
         let status = Arc::new(Mutex::new(WorkerStatus::Idle));
         let log = log.unwrap_or_else(|| Arc::new(EventLog::new(id.clone(), self.events.clone())));
 
-        let task = tokio::spawn(run_worker(
+        if let Some(hub) = &self.hub {
+            hub.register(&config, &tx);
+        }
+        let runtime = Runtime {
+            id: id.clone(),
             agent,
-            mailbox,
-            log.clone(),
-            status.clone(),
-            self.persistence.as_ref().map(|p| p.store.clone()),
-            id.clone(),
-        ));
+            log: log.clone(),
+            status: status.clone(),
+            store: self.persistence.as_ref().map(|p| p.store.clone()),
+            hub: self.hub.clone(),
+        };
+        let task = tokio::spawn(run_worker(runtime, mailbox));
 
         workers.insert(
             id.clone(),
@@ -424,6 +466,9 @@ impl WorkerManager {
             .unwrap()
             .remove(id)
             .ok_or_else(|| ManagerError::NotFound(id.to_string()))?;
+        if let Some(hub) = &self.hub {
+            hub.unregister(id);
+        }
         let _ = handle.task.await;
         Ok(handle.log)
     }
@@ -448,12 +493,21 @@ impl WorkerManager {
             return Err(ManagerError::NotFound(id.to_string()).into());
         }
 
+        let channels = match &self.hub {
+            Some(hub) => hub.channels_of(id).await?,
+            None => Vec::new(),
+        };
         if running {
             self.shutdown(id).await?;
         }
         if let Some(p) = &self.persistence {
             p.store.delete_worker(id).await?;
             p.homes.remove(id)?;
+        }
+        if let Some(hub) = &self.hub {
+            for channel_id in channels {
+                hub.changed(&channel_id);
+            }
         }
         Ok(())
     }
