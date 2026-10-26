@@ -13,7 +13,9 @@ use sqlx::sqlite::{SqliteConnectOptions, SqlitePool, SqlitePoolOptions};
 use subspace::types::Message;
 use subspace::types::new_id;
 
-use crate::channel::{Author, Channel, ChannelPost, Conversation, DEFAULT_WORKSPACE, Workspace};
+use crate::channel::{
+    Author, Channel, ChannelPost, Conversation, DEFAULT_WORKSPACE, Routing, Workspace,
+};
 use crate::event::Notice;
 use crate::worker::WorkerConfig;
 
@@ -580,8 +582,8 @@ impl SqliteStore {
         let row = sqlx::query(
             "INSERT INTO channel_posts
                  (id, channel_id, author_kind, author_id, author_name, text, mentions,
-                  root_id, hops, created_at)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                  root_id, hops, routing, created_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
              RETURNING seq",
         )
         .bind(&post.id)
@@ -593,10 +595,21 @@ impl SqliteStore {
         .bind(serde_json::to_string(&post.mentions)?)
         .bind(&post.root_id)
         .bind(post.hops as i64)
+        .bind(serde_json::to_string(&post.routing)?)
         .bind(post.timestamp.to_rfc3339())
         .fetch_one(&self.pool)
         .await?;
         Ok(row.get::<i64, _>("seq") as u64)
+    }
+
+    /// Record how a post was routed.
+    pub async fn set_routing(&self, post_id: &str, routing: &Routing) -> Result<()> {
+        sqlx::query("UPDATE channel_posts SET routing = ? WHERE id = ?")
+            .bind(serde_json::to_string(routing)?)
+            .bind(post_id)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
     }
 
     /// A channel's posts, oldest first.
@@ -608,7 +621,7 @@ impl SqliteStore {
     pub async fn posts_after(&self, channel_id: &str, after: u64) -> Result<Vec<ChannelPost>> {
         let rows = sqlx::query(
             "SELECT seq, id, channel_id, author_kind, author_id, author_name, text, mentions,
-                    root_id, hops, created_at
+                    root_id, hops, routing, created_at
              FROM channel_posts WHERE channel_id = ? AND seq > ? ORDER BY seq",
         )
         .bind(channel_id)
@@ -622,6 +635,7 @@ impl SqliteStore {
                     _ => Author::Operator,
                 };
                 let mentions: String = row.get("mentions");
+                let routing: String = row.get("routing");
                 Ok(ChannelPost {
                     id: row.get("id"),
                     channel_id: row.get("channel_id"),
@@ -632,6 +646,7 @@ impl SqliteStore {
                     mentions: serde_json::from_str(&mentions)?,
                     root_id: row.get("root_id"),
                     hops: row.get::<i64, _>("hops") as u32,
+                    routing: serde_json::from_str(&routing)?,
                     timestamp: parse_ts(row.get("created_at"))?,
                 })
             })

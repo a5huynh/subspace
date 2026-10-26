@@ -64,7 +64,7 @@ pub enum ChannelStreamMessage {
         since: u64,
     },
     Event {
-        event: ChannelEvent,
+        event: Box<ChannelEvent>,
     },
     Resync {
         reason: String,
@@ -121,7 +121,9 @@ impl Frames for ChannelFrames {
         }
     }
     fn event(event: ChannelEvent) -> ChannelStreamMessage {
-        ChannelStreamMessage::Event { event }
+        ChannelStreamMessage::Event {
+            event: Box::new(event),
+        }
     }
     fn resync(reason: String) -> ChannelStreamMessage {
         ChannelStreamMessage::Resync { reason }

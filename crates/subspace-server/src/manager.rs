@@ -18,6 +18,7 @@ use ts_rs::TS;
 
 use crate::WorkerId;
 use crate::channel::hub::ChannelHub;
+use crate::channel::router::{DEFAULT_ROUTER_MODEL, Router};
 use crate::event::{EventLog, Notice, Replay, ServerEvent};
 use crate::home::Homes;
 use crate::home_tools::{HomeScope, home_tools};
@@ -130,9 +131,10 @@ impl WorkerManager {
 
     fn build(provider: Arc<dyn Provider>, persistence: Option<Persistence>) -> Self {
         let (events, _) = broadcast::channel(EVENT_BUS_CAPACITY);
-        let hub = persistence
-            .as_ref()
-            .map(|p| Arc::new(ChannelHub::new(p.store.clone())));
+        let hub = persistence.as_ref().map(|p| {
+            let router = Router::new(provider.clone(), DEFAULT_ROUTER_MODEL);
+            Arc::new(ChannelHub::new(p.store.clone(), router))
+        });
         Self {
             provider,
             events,
@@ -141,6 +143,17 @@ impl WorkerManager {
             hub,
             epoch: new_id(),
         }
+    }
+
+    /// Use `model` to route channel posts that mention nobody. Call before
+    /// starting workers.
+    pub fn with_router_model(mut self, model: impl Into<String>) -> Self {
+        let model = model.into();
+        if let Some(p) = &self.persistence {
+            let router = Router::new(self.provider.clone(), model);
+            self.hub = Some(Arc::new(ChannelHub::new(p.store.clone(), router)));
+        }
+        self
     }
 
     /// Workspaces and channels. Only available with persistence.

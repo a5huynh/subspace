@@ -7,9 +7,10 @@ use std::fs;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use common::{ScriptedProvider, last_user_text, prompt_and_wait, settle};
+use common::{ScriptedProvider, is_router, last_user_text, prompt_and_wait, settle};
 use subspace::types::new_id;
-use subspace_server::channel::{Author, HOP_LIMIT};
+use subspace_server::channel::router::DEFAULT_ROUTER_MODEL;
+use subspace_server::channel::{Author, HOP_LIMIT, Routing};
 use subspace_server::store::SqliteStore;
 use subspace_server::{Homes, ManagerError, WorkerConfig, WorkerManager};
 
@@ -90,7 +91,9 @@ async fn new_workers_join_the_default_workspace() {
 #[tokio::test]
 async fn a_mention_wakes_only_that_worker_and_its_reply_is_posted() {
     let f = fixture(|r| {
-        if r.system_prompt.as_deref() == Some("ROLE:Alpha") {
+        if is_router(r) {
+            r#"{"handle": null, "reason": "just a note"}"#.into()
+        } else if r.system_prompt.as_deref() == Some("ROLE:Alpha") {
             "alpha here".into()
         } else {
             "beta here".into()
@@ -122,10 +125,24 @@ async fn a_mention_wakes_only_that_worker_and_its_reply_is_posted() {
     assert!(prompt.contains("You are @alpha."), "{prompt}");
     assert!(prompt.contains("[@you] @alpha status?"), "{prompt}");
 
-    // A post without mentions wakes nobody.
+    // Explicit mentions skip the router.
+    assert!(f.provider.requests().iter().all(|r| !is_router(r)));
+
+    // An unaddressed note goes to the router, which can decide nobody answers.
     f.post(&ch, "just a note").await;
     settle(&f.manager, &ch, 3).await;
-    assert_eq!(f.provider.requests().len(), 1);
+    let posts = f.manager.channels().unwrap().posts(&ch).await.unwrap();
+    assert_eq!(
+        posts[2].routing,
+        Routing::Nobody {
+            reason: "just a note".into()
+        }
+    );
+    assert_eq!(
+        f.provider.requests().len(),
+        2,
+        "one worker turn + one routing call"
+    );
 }
 
 #[tokio::test]
@@ -325,4 +342,154 @@ async fn channels_need_persistence() {
         err.downcast_ref(),
         Some(ManagerError::Unsupported(_))
     ));
+}
+
+#[tokio::test]
+async fn unaddressed_posts_go_to_the_best_fit_worker() {
+    let f = fixture(|r| {
+        if is_router(r) {
+            // Pick by description, as the real router would.
+            let text = last_user_text(r);
+            if text.contains("New message:\n[@you] Draft") {
+                r#"Sure: {"handle": "@Writer", "reason": "drafting is their job"}"#.into()
+            } else {
+                r#"{"handle": "researcher", "reason": "a factual question"}"#.into()
+            }
+        } else {
+            format!("{} answering", r.system_prompt.as_deref().unwrap_or(""))
+        }
+    })
+    .await;
+    let researcher = f.worker("Researcher").await;
+    let writer = f.worker("Writer").await;
+    let hub = f.manager.channels().unwrap();
+    let mut cfg = f.manager.get(&writer).unwrap();
+    cfg.description = "Drafts announcements".into();
+    f.manager.update(cfg).await.unwrap();
+    let ch = f.channel("launch", &[&researcher, &writer]).await;
+
+    f.post(&ch, "What changed in v2?").await;
+    settle(&f.manager, &ch, 2).await;
+    f.post(&ch, "Draft the announcement").await;
+    settle(&f.manager, &ch, 4).await;
+
+    let posts = hub.posts(&ch).await.unwrap();
+    assert_eq!(
+        posts[0].routing,
+        Routing::Chosen {
+            worker_id: researcher.clone(),
+            reason: "a factual question".into()
+        }
+    );
+    assert_eq!(posts[1].text, "ROLE:Researcher answering");
+    assert_eq!(
+        posts[2].routing,
+        Routing::Chosen {
+            worker_id: writer.clone(),
+            reason: "drafting is their job".into()
+        }
+    );
+    assert_eq!(posts[3].text, "ROLE:Writer answering");
+    assert_eq!(
+        posts[1].routing,
+        Routing::Direct,
+        "worker replies aren't routed"
+    );
+
+    // The routing call uses the router model and sees members, roles, and context.
+    let routing: Vec<_> = f
+        .provider
+        .requests()
+        .into_iter()
+        .filter(is_router)
+        .collect();
+    assert_eq!(routing.len(), 2);
+    assert!(routing.iter().all(|r| r.model == DEFAULT_ROUTER_MODEL));
+    let prompt = last_user_text(&routing[1]);
+    assert!(
+        prompt.contains("- @writer (Writer): Drafts announcements\n  Role: ROLE:Writer"),
+        "{prompt}"
+    );
+    assert!(
+        prompt.contains(
+            "Recent posts:\n[@you] What changed in v2?\n[@researcher] ROLE:Researcher answering"
+        ),
+        "{prompt}"
+    );
+}
+
+#[tokio::test]
+async fn a_lone_worker_answers_without_a_routing_call() {
+    let f = fixture(|_| "on it".into()).await;
+    let alpha = f.worker("Alpha").await;
+    let ch = f.channel("solo", &[&alpha]).await;
+
+    f.post(&ch, "anything new?").await;
+    settle(&f.manager, &ch, 2).await;
+    let posts = f.manager.channels().unwrap().posts(&ch).await.unwrap();
+    assert!(matches!(&posts[0].routing, Routing::Chosen { worker_id, .. } if worker_id == &alpha));
+    assert_eq!(f.provider.requests().len(), 1);
+    assert!(!is_router(&f.provider.requests()[0]));
+}
+
+#[tokio::test]
+async fn an_unusable_routing_answer_wakes_nobody_and_says_so() {
+    let f = fixture(|r| {
+        if is_router(r) {
+            r#"{"handle": "ghost", "reason": "?"}"#.into()
+        } else {
+            "should not run".into()
+        }
+    })
+    .await;
+    let alpha = f.worker("Alpha").await;
+    let beta = f.worker("Beta").await;
+    let ch = f.channel("launch", &[&alpha, &beta]).await;
+
+    f.post(&ch, "hello?").await;
+    settle(&f.manager, &ch, 1).await;
+    let hub = f.manager.channels().unwrap();
+    let posts = hub.posts(&ch).await.unwrap();
+    assert_eq!(posts.len(), 1);
+    assert!(matches!(&posts[0].routing, Routing::Failed { error } if error.contains("@ghost")));
+    let notices = hub.notices(&ch).await.unwrap();
+    assert!(
+        notices[0].text.contains("@mention someone"),
+        "{}",
+        notices[0].text
+    );
+    assert!(f.provider.requests().iter().all(is_router));
+}
+
+#[test]
+fn router_answers_are_parsed_leniently_but_checked() {
+    use subspace_server::channel::ChannelMember;
+    use subspace_server::channel::router::{Candidate, parse_answer};
+    let candidates = vec![Candidate {
+        member: ChannelMember {
+            worker_id: "w1".into(),
+            name: "Writer".into(),
+            handle: "writer".into(),
+            description: String::new(),
+        },
+        role: String::new(),
+    }];
+    let chosen = |reason: &str| Routing::Chosen {
+        worker_id: "w1".into(),
+        reason: reason.into(),
+    };
+    assert_eq!(
+        parse_answer(
+            "```json\n{\"handle\": \"@writer\", \"reason\": \"copy\"}\n```",
+            &candidates
+        )
+        .unwrap(),
+        chosen("copy")
+    );
+    assert_eq!(
+        parse_answer(r#"{"handle": "WRITER"}"#, &candidates).unwrap(),
+        chosen("")
+    );
+    assert!(parse_answer("the writer", &candidates).is_err());
+    assert!(parse_answer(r#"{"handle": 3}"#, &candidates).is_err());
 }

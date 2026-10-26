@@ -11,6 +11,7 @@ use ts_rs::TS;
 use crate::WorkerId;
 
 pub mod hub;
+pub mod router;
 
 pub type WorkspaceId = String;
 pub type ChannelId = String;
@@ -84,7 +85,32 @@ pub struct ChannelPost {
     pub root_id: String,
     /// Worker-to-worker hops since `root_id` (0 for operator posts).
     pub hops: u32,
+    /// Who was picked to answer, for operator posts that mention nobody.
+    pub routing: Routing,
     pub timestamp: DateTime<Utc>,
+}
+
+/// How a post found its responder.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub enum Routing {
+    /// Not routed: it mentions workers, comes from a worker, or the channel
+    /// has no running workers.
+    Direct,
+    /// The router is choosing.
+    Pending,
+    Chosen {
+        worker_id: WorkerId,
+        reason: String,
+    },
+    /// The router decided the post needs no reply.
+    Nobody {
+        reason: String,
+    },
+    /// Routing failed; nobody was woken.
+    Failed {
+        error: String,
+    },
 }
 
 /// A worker's membership in a channel, as shown to clients.

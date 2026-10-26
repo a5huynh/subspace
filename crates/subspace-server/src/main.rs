@@ -8,6 +8,7 @@ use anyhow::{Context, Result};
 use clap::Parser;
 use subspace::provider::Provider;
 use subspace::provider::anthropic::AnthropicProvider;
+use subspace_server::channel::router::DEFAULT_ROUTER_MODEL;
 use subspace_server::store::SqliteStore;
 use subspace_server::{Homes, WorkerManager, api};
 use tracing_subscriber::EnvFilter;
@@ -26,6 +27,10 @@ struct Cli {
     /// Address to listen on. There is no authentication: keep this on loopback.
     #[arg(long, env = "SUBSPACE_BIND", default_value = "127.0.0.1:7700")]
     bind: SocketAddr,
+
+    /// Model that picks who answers channel posts mentioning nobody
+    #[arg(long, env = "SUBSPACE_ROUTER_MODEL", default_value = DEFAULT_ROUTER_MODEL)]
+    router_model: String,
 
     /// Anthropic API key
     #[arg(long, env = "ANTHROPIC_API_KEY", hide_env_values = true)]
@@ -61,11 +66,15 @@ async fn main() -> Result<()> {
     let homes = Homes::open(&data_dir)?;
     let provider: Arc<dyn Provider> = Arc::new(AnthropicProvider::new(cli.anthropic_api_key));
 
-    let manager = Arc::new(WorkerManager::with_persistence(provider, store, homes));
+    let manager = Arc::new(
+        WorkerManager::with_persistence(provider, store, homes)
+            .with_router_model(&cli.router_model),
+    );
     let started = manager.boot().await.context("restoring workers")?;
     tracing::info!(
-        "data dir {} ({started} workers restored)",
-        data_dir.display()
+        "data dir {} ({started} workers restored); routing with {}",
+        data_dir.display(),
+        cli.router_model
     );
 
     if !cli.bind.ip().is_loopback() {

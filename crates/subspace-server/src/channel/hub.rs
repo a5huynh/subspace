@@ -14,9 +14,10 @@ use chrono::Utc;
 use subspace::types::new_id;
 use tokio::sync::{broadcast, mpsc};
 
+use super::router::{CONTEXT_POSTS, Candidate, Router};
 use super::{
     Author, BACKLOG_LIMIT, Channel, ChannelMember, ChannelPost, Conversation, HOP_LIMIT,
-    OPERATOR_HANDLE, Workspace, handle_for, parse_mentions, render_turn,
+    OPERATOR_HANDLE, Routing, Workspace, handle_for, parse_mentions, render_turn,
 };
 use crate::WorkerId;
 use crate::event::{
@@ -45,6 +46,7 @@ pub struct Turn {
 struct Registered {
     name: String,
     description: String,
+    role: String,
     tx: mpsc::WeakSender<Stimulus>,
 }
 
@@ -53,17 +55,24 @@ pub struct ChannelHub {
     bus: broadcast::Sender<ChannelEvent>,
     logs: Mutex<HashMap<String, Arc<ChannelLog>>>,
     workers: Mutex<HashMap<WorkerId, Registered>>,
+    router: Router,
 }
 
 impl ChannelHub {
-    pub fn new(store: Arc<SqliteStore>) -> Self {
+    pub fn new(store: Arc<SqliteStore>, router: Router) -> Self {
         let (bus, _) = broadcast::channel(CHANNEL_BUS_CAPACITY);
         Self {
             store,
             bus,
             logs: Mutex::new(HashMap::new()),
             workers: Mutex::new(HashMap::new()),
+            router,
         }
+    }
+
+    /// The model used to route unaddressed posts.
+    pub fn router_model(&self) -> &str {
+        self.router.model()
     }
 
     /// Make a running worker reachable from channels (call again after a
@@ -74,6 +83,7 @@ impl ChannelHub {
             Registered {
                 name: config.name.clone(),
                 description: config.description.clone(),
+                role: config.role.clone(),
                 tx: tx.downgrade(),
             },
         );
@@ -410,14 +420,35 @@ impl ChannelHub {
             .await
     }
 
-    /// Post as the operator, waking the workers it mentions.
-    pub async fn post_operator(&self, channel_id: &str, text: &str) -> Result<ChannelPost> {
-        self.channel(channel_id).await?;
+    /// Post as the operator. A post that mentions workers wakes them; one
+    /// that mentions nobody is routed to the best-suited running member (in
+    /// the background when that takes a model call).
+    pub async fn post_operator(
+        self: &Arc<Self>,
+        channel_id: &str,
+        text: &str,
+    ) -> Result<ChannelPost> {
+        let channel = self.channel(channel_id).await?;
         let text = text.trim();
         if text.is_empty() {
             return Err(ManagerError::Invalid("post text must not be empty".into()).into());
         }
         let members = self.members(channel_id).await?;
+        let mentions = resolve_mentions(text, &members, None);
+        let candidates = if mentions.is_empty() {
+            self.candidates(&members)
+        } else {
+            Vec::new()
+        };
+        let routing = match candidates.len() {
+            0 => Routing::Direct,
+            1 => Routing::Chosen {
+                worker_id: candidates[0].member.worker_id.clone(),
+                reason: "the only worker in this channel".into(),
+            },
+            _ => Routing::Pending,
+        };
+
         let id = new_id();
         let mut post = ChannelPost {
             id: id.clone(),
@@ -426,10 +457,19 @@ impl ChannelHub {
             author: Author::Operator,
             author_name: "You".to_string(),
             text: text.to_string(),
-            mentions: resolve_mentions(text, &members, None),
+            mentions,
             root_id: id.clone(),
             hops: 0,
+            routing,
             timestamp: Utc::now(),
+        };
+        // Context for the router: the posts before this one.
+        let recent = if post.routing == Routing::Pending {
+            let mut all = self.store.list_posts(channel_id).await?;
+            all.drain(..all.len().saturating_sub(CONTEXT_POSTS));
+            all
+        } else {
+            Vec::new()
         };
         post.seq = self.store.append_post(&post).await?;
         self.emit(channel_id, ChannelEventKind::Post(post.clone()));
@@ -438,10 +478,82 @@ impl ChannelHub {
             root_id: id,
             hops: 0,
         };
-        for worker_id in &post.mentions {
-            self.wake(channel_id, worker_id, &trigger).await;
+        match &post.routing {
+            Routing::Chosen { worker_id, .. } => {
+                self.wake(channel_id, worker_id, &trigger).await;
+            }
+            Routing::Pending => {
+                let hub = self.clone();
+                let post = post.clone();
+                tokio::spawn(async move {
+                    hub.route(channel, candidates, recent, post, trigger).await;
+                });
+            }
+            _ => {
+                for worker_id in &post.mentions {
+                    self.wake(channel_id, worker_id, &trigger).await;
+                }
+            }
         }
         Ok(post)
+    }
+
+    /// Running members the router may pick.
+    fn candidates(&self, members: &[ChannelMember]) -> Vec<Candidate> {
+        let workers = self.workers.lock().unwrap();
+        members
+            .iter()
+            .filter_map(|m| {
+                workers.get(&m.worker_id).map(|w| Candidate {
+                    member: m.clone(),
+                    role: w.role.clone(),
+                })
+            })
+            .collect()
+    }
+
+    /// Ask the router, record its decision on the post, and wake the pick.
+    async fn route(
+        &self,
+        channel: Channel,
+        candidates: Vec<Candidate>,
+        recent: Vec<ChannelPost>,
+        post: ChannelPost,
+        trigger: Trigger,
+    ) {
+        let routing = match self
+            .router
+            .choose(&channel, &candidates, &recent, &post)
+            .await
+        {
+            Ok(routing) => routing,
+            Err(e) => {
+                tracing::warn!("routing a post in #{} failed: {e:#}", channel.name);
+                self.notice(
+                    &channel.id,
+                    "",
+                    NoticeLevel::Warning,
+                    "Couldn't pick a worker to answer; @mention someone instead.",
+                )
+                .await;
+                Routing::Failed {
+                    error: format!("{e:#}"),
+                }
+            }
+        };
+        if let Err(e) = self.store.set_routing(&post.id, &routing).await {
+            tracing::warn!("failed to persist routing: {e:#}");
+        }
+        self.emit(
+            &channel.id,
+            ChannelEventKind::Routed {
+                post_id: post.id.clone(),
+                routing: routing.clone(),
+            },
+        );
+        if let Routing::Chosen { worker_id, .. } = &routing {
+            self.wake(&channel.id, worker_id, &trigger).await;
+        }
     }
 
     /// Post a worker's reply. Its mentions are woken unless the chain has hit
@@ -465,6 +577,7 @@ impl ChannelHub {
             mentions: resolve_mentions(text, &members, Some(worker_id)),
             root_id: trigger.root_id.clone(),
             hops,
+            routing: Routing::Direct,
             timestamp: Utc::now(),
         };
         post.seq = self.store.append_post(&post).await?;

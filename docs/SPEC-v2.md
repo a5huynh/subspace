@@ -69,7 +69,8 @@ The product is a "team of agents you manage," not a library you embed.
   workspace, **General**, exists to start with.
 - **Channel** — collaborative context for a piece of work: a named, shared transcript
   inside a workspace whose members are the human operator plus some workers. Workers reply
-  when @mentioned, including by each other, which is how agents talk to one another.
+  when @mentioned, including by each other, which is how agents talk to one another; an
+  operator post that mentions nobody goes to the best-suited member.
 - **DM** — the private 1:1 conversation between the operator and one worker (the original
   "chat with a worker"). Every worker has exactly one.
 - **Mailbox** — a per-worker input queue. Both user prompts and routed integration events
@@ -578,8 +579,22 @@ worker runs, so viewers watch it work; afterwards the post holds only the text.
 
 ### Routing and loop safety
 
-- **Mention-only.** A post wakes the members it @mentions, except its author. A post with
-  no mentions wakes nobody.
+- **Mentions are explicit routing.** A post wakes the members it @mentions, except its
+  author.
+- **Unaddressed operator posts are auto-routed.** When the operator mentions nobody, the
+  hub picks one running member to answer:
+  - none running → nobody; one → that worker (no model call);
+  - two or more → one quick call to the **router model** (`--router-model`, default
+    `claude-haiku-5-5`). It sees each member's handle, name, description, and the start
+    of its role (600 chars), plus the last 10 posts, so follow-ups go to whoever is already
+    on it. It answers `{"handle": ..., "reason": ...}`, or `handle: null` when the post needs
+    no reply (thanks, FYIs).
+
+  The decision is stored on the post (`routing`: `direct` / `pending` / `chosen` /
+  `nobody` / `failed`) and published as a `Routed` event; the console shows "→ Writer ·
+  reason". Routing runs in the background, so posting stays instant. A failed or unusable
+  answer wakes nobody and leaves a notice asking for an @mention.
+- **Worker replies are never auto-routed**: a reply that mentions nobody ends the chain.
 - **Hop limit.** Each operator post starts a chain (`root_id`, `hops = 0`). A worker's
   reply carries `hops = trigger.hops + 1`. When a reply at `hops ≥ HOP_LIMIT` (default
   **5**) mentions workers, they are not woken; a notice says the chain stopped and the
@@ -592,8 +607,6 @@ worker runs, so viewers watch it work; afterwards the post holds only the text.
 
 - **Channel files**: a shared folder per channel that members can read and write (like
   Slack canvases). Planned; likely lands with Phase E's memory/wiki work.
-- **Lead worker**: an optional per-channel worker that answers every operator post without
-  a mention.
 - `@channel` mentions; a tool-call summary attached to posts; multiple workspaces in the
   console (the data model and API already allow them).
 
@@ -636,6 +649,7 @@ struct ChannelEvent {
 
 enum ChannelEventKind {
     Post(ChannelPost),                            // persisted, stable id
+    Routed { post_id: Id, routing: Routing },     // who answers an unaddressed post
     Notice(Notice),                               // run failure, hop limit, ...
     Worker { worker_id: WorkerId, event: WorkerEvent },  // live run activity
     Changed,                                      // name/topic/members changed: refetch
@@ -767,7 +781,7 @@ for wiring and state.
 | `workspace_members` | workspace_id, worker_id, joined_at |
 | `channels` | id, workspace_id, name (unique per workspace), topic, created_at |
 | `channel_members` | channel_id, worker_id, last_seen_seq, joined_at |
-| `channel_posts` | seq, id, channel_id, author_kind, author_id, author_name, text, mentions(json), root_id, hops, created_at |
+| `channel_posts` | seq, id, channel_id, author_kind, author_id, author_name, text, mentions(json), root_id, hops, routing(json), created_at |
 | `memory_notes` | id, worker_id, path, text, tags(json), ts — FTS5 **index** over `memory/*.md` |
 | `compactions` | id, worker_id, summary, through_seq, ts |
 | `notices` | id, worker_id, conversation, level (warning/error), text, created_at; run errors shown to humans, never sent to the model |

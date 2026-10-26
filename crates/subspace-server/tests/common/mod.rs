@@ -156,17 +156,30 @@ pub fn last_user_text(request: &CompletionRequest) -> String {
         .unwrap_or_default()
 }
 
-/// Wait until `channel` has at least `posts` posts and every worker is idle.
+/// Whether a request is a channel routing call (not a worker turn).
+pub fn is_router(request: &CompletionRequest) -> bool {
+    request
+        .system_prompt
+        .as_deref()
+        .is_some_and(|p| p.starts_with("You route messages"))
+}
+
+/// Wait until `channel` has at least `posts` posts, no routing is pending,
+/// and every worker is idle.
 pub async fn settle(manager: &WorkerManager, channel: &str, posts: usize) {
     let hub = manager.channels().unwrap();
     tokio::time::timeout(Duration::from_secs(5), async {
         loop {
-            let count = hub.posts(channel).await.unwrap().len();
+            let all = hub.posts(channel).await.unwrap();
+            let count = all.len();
+            let routed = all
+                .iter()
+                .all(|p| p.routing != subspace_server::channel::Routing::Pending);
             let idle = manager
                 .list()
                 .iter()
                 .all(|w| w.status == WorkerStatus::Idle);
-            if count >= posts && idle {
+            if count >= posts && routed && idle {
                 // Let any just-queued turn start before declaring quiet.
                 tokio::time::sleep(Duration::from_millis(30)).await;
                 if manager

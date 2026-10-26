@@ -3,6 +3,7 @@ import { useLayoutEffect, useMemo, useRef, useState, type KeyboardEvent } from '
 import { api } from '../api/client'
 import type { ChannelMember } from '../api/generated/ChannelMember'
 import type { ChannelPost } from '../api/generated/ChannelPost'
+import type { Routing } from '../api/generated/Routing'
 import { channelTimeline } from '../chat/channel'
 import { OPERATOR_HANDLE, complete, mentionAt, segments, suggest } from '../chat/mentions'
 import { isToolResultMessage, toolResults, type ChatState } from '../chat/state'
@@ -61,13 +62,13 @@ export function ChannelView({ id }: { id: string }) {
         {channel && state.posts.length === 0 && (
           <p className="muted empty">
             {state.members.length === 0
-              ? 'Add workers in Settings, then @mention them to get them talking.'
-              : `Start the conversation; @mention a member to bring them in.`}
+              ? 'Add workers in Settings to get them talking.'
+              : 'Ask anything: the best-suited member answers, or @mention someone directly.'}
           </p>
         )}
         {channelTimeline(state).map((item) =>
           item.kind === 'post' ? (
-            <Post key={item.post.id} post={item.post} known={known} />
+            <Post key={item.post.id} post={item.post} known={known} nameOf={nameOf} />
           ) : (
             <p key={item.notice.id} className={`notice notice-${item.notice.level}`}>
               {item.notice.text}
@@ -99,7 +100,15 @@ function MemberSummary({ members }: { members: ChannelMember[] }) {
   )
 }
 
-function Post({ post, known }: { post: ChannelPost; known: Set<string> }) {
+function Post({
+  post,
+  known,
+  nameOf,
+}: {
+  post: ChannelPost
+  known: Set<string>
+  nameOf: (workerId: string) => string
+}) {
   const mine = post.author.kind === 'operator'
   return (
     <article className={mine ? 'post post-operator' : 'post'}>
@@ -120,8 +129,40 @@ function Post({ post, known }: { post: ChannelPost; known: Set<string> }) {
           ),
         )}
       </div>
+      <RoutingNote routing={post.routing} nameOf={nameOf} />
     </article>
   )
+}
+
+/** Who an unaddressed post was given to, and why. */
+function RoutingNote({
+  routing,
+  nameOf,
+}: {
+  routing: Routing
+  nameOf: (workerId: string) => string
+}) {
+  switch (routing.state) {
+    case 'direct':
+    case 'failed':
+      // Failures are explained by a channel notice.
+      return null
+    case 'pending':
+      return <p className="routing muted small typing">Choosing who should answer…</p>
+    case 'chosen':
+      return (
+        <p className="routing muted small" title="Picked automatically from member descriptions and roles">
+          → {nameOf(routing.worker_id)}
+          {routing.reason && <> · {routing.reason}</>}
+        </p>
+      )
+    case 'nobody':
+      return (
+        <p className="routing muted small">
+          No reply needed{routing.reason && <> · {routing.reason}</>}
+        </p>
+      )
+  }
 }
 
 /** A worker mid-turn: its finished steps (tool calls) and live output. */
@@ -265,7 +306,7 @@ function ChannelComposer({ channelId, members }: { channelId: string; members: C
             }
           }}
           onClick={syncCaret}
-          placeholder="Message the channel (@ to mention, Enter to send)"
+          placeholder="Message the channel (@ to mention someone, Enter to send)"
           rows={3}
           aria-label="Message"
         />

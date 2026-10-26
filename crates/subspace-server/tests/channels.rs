@@ -3,8 +3,8 @@
 use chrono::Utc;
 use subspace::types::{Message, new_id};
 use subspace_server::channel::{
-    Author, Channel, ChannelMember, ChannelPost, Conversation, DEFAULT_WORKSPACE, handle_for,
-    parse_mentions, render_turn,
+    Author, Channel, ChannelMember, ChannelPost, Conversation, DEFAULT_WORKSPACE, Routing,
+    handle_for, parse_mentions, render_turn,
 };
 use subspace_server::event::{Notice, NoticeLevel};
 use subspace_server::store::SqliteStore;
@@ -21,6 +21,7 @@ fn post(channel: &str, author: Author, name: &str, text: &str) -> ChannelPost {
         mentions: Vec::new(),
         root_id: id,
         hops: 0,
+        routing: Routing::Direct,
         timestamp: Utc::now(),
     }
 }
@@ -309,4 +310,23 @@ async fn deleting_a_worker_drops_its_memberships_but_keeps_its_posts() {
         store.list_posts(&ch.id).await.unwrap()[0].author_name,
         "Writer"
     );
+}
+
+#[tokio::test]
+async fn routing_is_stored_and_updated() {
+    let store = SqliteStore::connect("sqlite::memory:").await.unwrap();
+    let mut p = post("c1", Author::Operator, "You", "who can help?");
+    p.routing = Routing::Pending;
+    store.append_post(&p).await.unwrap();
+    assert_eq!(
+        store.list_posts("c1").await.unwrap()[0].routing,
+        Routing::Pending
+    );
+
+    let chosen = Routing::Chosen {
+        worker_id: "w1".into(),
+        reason: "writes copy".into(),
+    };
+    store.set_routing(&p.id, &chosen).await.unwrap();
+    assert_eq!(store.list_posts("c1").await.unwrap()[0].routing, chosen);
 }

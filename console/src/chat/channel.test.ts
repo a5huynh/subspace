@@ -24,6 +24,7 @@ const post = (id: string, text: string, timestamp = '2026-01-01T00:00:01Z'): Cha
   mentions: [],
   root_id: id,
   hops: 0,
+  routing: { state: 'pending' },
   timestamp,
 })
 
@@ -43,6 +44,16 @@ test('posts merge by id across detail and replay', () => {
     fromDetail(detail([p])),
   )
   assert.deepEqual(s.posts, [p])
+})
+
+test('a routing decision updates its post, even after a replay', () => {
+  const p = post('p1', 'who knows?')
+  const routed = ev({
+    type: 'routed',
+    data: { post_id: 'p1', routing: { state: 'chosen', worker_id: 'w1', reason: 'facts' } },
+  })
+  const s = [ev({ type: 'post', data: p }), routed].reduce(applyChannelEvent, fromDetail(detail([p])))
+  assert.deepEqual(s.posts[0].routing, { state: 'chosen', worker_id: 'w1', reason: 'facts' })
 })
 
 test('a worker turn streams live, then clears when it goes idle', () => {

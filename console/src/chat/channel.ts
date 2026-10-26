@@ -58,6 +58,13 @@ export function applyChannelEvent(state: ChannelState, event: ChannelEvent): Cha
       return { ...state, posts: mergeById(state.posts, [inner.data]) }
     case 'notice':
       return { ...state, notices: mergeById(state.notices, [inner.data]) }
+    case 'routed': {
+      const { post_id, routing } = inner.data
+      return {
+        ...state,
+        posts: state.posts.map((p) => (p.id === post_id ? { ...p, routing } : p)),
+      }
+    }
     case 'changed':
       return { ...state, stale: true }
     case 'deleted':

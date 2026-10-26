@@ -12,7 +12,7 @@ use tokio::sync::broadcast;
 use ts_rs::TS;
 
 use crate::WorkerId;
-use crate::channel::{ChannelId, ChannelPost};
+use crate::channel::{ChannelId, ChannelPost, Routing};
 use crate::worker::WorkerStatus;
 
 /// How many recent events each worker keeps for stream replay.
@@ -93,6 +93,8 @@ pub struct ChannelEvent {
 pub enum ChannelEventKind {
     /// A post was persisted (stable id; merge with fetched posts).
     Post(ChannelPost),
+    /// An operator post's routing was decided (or failed).
+    Routed { post_id: String, routing: Routing },
     /// A persisted notice: a failed turn, the hop limit, an undeliverable wake.
     Notice(Notice),
     /// Live activity from a worker taking its turn in this channel.
