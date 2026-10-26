@@ -214,7 +214,7 @@ struct WorkerConfig {
     name: String,                 // "Secretary" (display only; dirs are keyed by id)
     description: String,          // one line: what this worker is good at (used for routing)
     role: String,                 // system prompt / persona — contents of ROLE.md
-    model: String,                // defaults to engine default (claude-opus-4-8)
+    model: String,                // defaults to engine default (claude-opus-5-5)
     thinking: ThinkingLevel,      // engine type
     policies: Vec<PolicyRule>,    // action approval rules
     skills: SkillSelection,       // [skills] disabled = [...]; default: all enabled
