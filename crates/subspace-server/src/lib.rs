@@ -7,6 +7,7 @@
 
 pub mod api;
 pub mod bindings;
+pub mod channel;
 pub mod event;
 pub mod home;
 pub mod home_tools;
