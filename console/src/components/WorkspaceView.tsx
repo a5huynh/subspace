@@ -5,12 +5,13 @@ import type { WorkspaceMember } from '../api/generated/WorkspaceMember'
 import type { Routing } from '../api/generated/Routing'
 import { workspaceTimeline } from '../chat/workspace'
 import { layoutRows } from '../chat/format'
-import { OPERATOR_HANDLE, segments } from '../chat/mentions'
+import { OPERATOR_HANDLE } from '../chat/mentions'
 import { isToolResultMessage, toolResults, type ChatState } from '../chat/state'
 import { useWorkspace } from '../chat/useWorkspace'
 import { href } from '../route'
 import { useNow } from '../useNow'
 import { useScrollToBottom } from '../useScrollToBottom'
+import { Markdown } from './Markdown'
 import { LiveContent, MessageContent } from './MessageView'
 import {
   Avatar,
@@ -45,7 +46,7 @@ export function WorkspaceView({ id }: { id: string }) {
   const workspace = state.workspace
   const nameOf = (workerId: string) =>
     state.members.find((m) => m.worker_id === workerId)?.name ?? 'A worker'
-  const renderText = (text: string) => <PostText text={text} known={known} />
+  const renderText = (text: string) => <Markdown text={text} known={known} />
 
   const items = workspaceTimeline(state)
   const running = Object.entries(state.running)
@@ -154,28 +155,6 @@ function MemberStack({ members, workspaceId }: { members: WorkspaceMember[]; wor
       </span>
       {members.length + 1}
     </a>
-  )
-}
-
-/** Post text with known @mentions as chips. */
-function PostText({ text, known }: { text: string; known: Set<string> }): ReactNode {
-  return (
-    <span className="break-words whitespace-pre-wrap">
-      {segments(text, known).map((s, i) =>
-        s.kind === 'mention' ? (
-          <span
-            key={i}
-            className={`rounded px-0.5 font-medium ${
-              s.handle === OPERATOR_HANDLE ? 'bg-mention-me text-ink' : 'bg-mention text-mention-ink'
-            }`}
-          >
-            {s.text}
-          </span>
-        ) : (
-          <span key={i}>{s.text}</span>
-        ),
-      )}
-    </span>
   )
 }
 

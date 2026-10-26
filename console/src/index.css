@@ -116,3 +116,88 @@
 @utility label {
   @apply flex flex-col gap-1 text-sm font-bold text-ink;
 }
+
+/* Message Markdown, Slack-flavored. Scoped so it never leaks into the UI. */
+@layer components {
+  .markdown {
+    @apply break-words;
+
+    & > * + * {
+      @apply mt-1.5;
+    }
+    & a {
+      @apply text-link;
+    }
+    & strong {
+      @apply font-bold;
+    }
+    & em {
+      @apply italic;
+    }
+    & del {
+      @apply line-through;
+    }
+    & code {
+      @apply rounded border border-line bg-subtle px-1 py-px font-mono text-[12px] text-danger;
+    }
+    & pre {
+      @apply overflow-x-auto rounded-md border border-line bg-subtle px-3 py-2 font-mono text-[12px] leading-relaxed;
+    }
+    & pre code {
+      @apply border-0 bg-transparent p-0 text-ink;
+    }
+    & ul {
+      @apply list-disc pl-6;
+    }
+    & ol {
+      @apply list-decimal pl-6;
+    }
+    & ul ul {
+      @apply list-[circle];
+    }
+    & li + li {
+      @apply mt-0.5;
+    }
+    & li > ul,
+    & li > ol {
+      @apply mt-0.5;
+    }
+    & input[type='checkbox'] {
+      @apply mr-1.5 align-middle;
+    }
+    & blockquote {
+      @apply border-l-4 border-line pl-3 text-muted;
+    }
+    & h1,
+    & h2,
+    & h3,
+    & h4 {
+      @apply font-black;
+    }
+    & h1 {
+      @apply text-xl;
+    }
+    & h2 {
+      @apply text-lg;
+    }
+    & hr {
+      @apply border-line;
+    }
+    & table {
+      @apply block max-w-full overflow-x-auto border-collapse text-sm;
+    }
+    & th,
+    & td {
+      @apply border border-line px-2.5 py-1 text-left;
+    }
+    & th {
+      @apply bg-subtle font-bold;
+    }
+    & .mention {
+      @apply rounded bg-mention px-0.5 font-medium text-mention-ink;
+    }
+    & .mention-me {
+      @apply bg-mention-me text-ink;
+    }
+  }
+}

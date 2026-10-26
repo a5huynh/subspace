@@ -5,6 +5,7 @@ import type { Message } from '../api/generated/Message'
 import type { ToolResult } from '../api/generated/ToolResult'
 import type { JsonValue } from '../api/generated/serde_json/JsonValue'
 import type { LiveBlock } from '../chat/state'
+import { Markdown } from './Markdown'
 
 type Results = Record<string, ToolResult>
 
@@ -12,7 +13,7 @@ type Results = Record<string, ToolResult>
 export function MessageContent({
   message,
   results,
-  renderText = plainText,
+  renderText = markdownText,
 }: {
   message: Message
   results: Results
@@ -58,7 +59,7 @@ function Block({
 export function LiveContent({
   blocks,
   results,
-  renderText = plainText,
+  renderText = markdownText,
 }: {
   blocks: LiveBlock[]
   results: Results
@@ -83,8 +84,8 @@ export function LiveContent({
   )
 }
 
-function plainText(text: string): ReactNode {
-  return <span className="break-words whitespace-pre-wrap">{text}</span>
+function markdownText(text: string): ReactNode {
+  return <Markdown text={text} />
 }
 
 function Thinking({ text, open }: { text: string; open?: boolean }) {
