@@ -28,6 +28,8 @@ function Block({ block, results }: { block: ContentBlock; results: Results }) {
       return <div className="text">{block.text}</div>
     case 'thinking':
       return <Thinking text={block.thinking} />
+    case 'redacted_thinking':
+      return <p className="muted small">Thinking (redacted by the provider)</p>
     case 'tool_use':
       return <ToolCall name={block.name} args={block.input} result={results[block.id]} />
     case 'image':

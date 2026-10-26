@@ -27,7 +27,18 @@ pub enum ContentBlock {
     Image { media_type: String, data: String },
 
     #[serde(rename = "thinking")]
-    Thinking { thinking: String },
+    Thinking {
+        thinking: String,
+        /// Opaque signature from the API, required when the block is sent
+        /// back in a later request. Absent on blocks recorded before it was kept.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[cfg_attr(feature = "ts", ts(optional))]
+        signature: Option<String>,
+    },
+
+    /// Thinking the API returned encrypted; kept only to send back.
+    #[serde(rename = "redacted_thinking")]
+    RedactedThinking { data: String },
 
     #[serde(rename = "tool_use")]
     ToolUse {
@@ -229,8 +240,19 @@ pub enum ThinkingLevel {
 }
 
 impl ThinkingLevel {
-    /// Map to Anthropic's budget_tokens hint.
-    /// Returns None for Off (thinking disabled).
+    /// Anthropic's adaptive-thinking effort (`output_config.effort`).
+    /// Returns None for Off (no thinking requested).
+    pub fn effort(&self) -> Option<&'static str> {
+        match self {
+            Self::Off => None,
+            Self::Low => Some("low"),
+            Self::Medium => Some("medium"),
+            Self::High => Some("high"),
+        }
+    }
+
+    /// Map to Anthropic's budget_tokens hint, for models that predate
+    /// adaptive thinking. Returns None for Off (thinking disabled).
     pub fn budget_tokens(&self) -> Option<u32> {
         match self {
             Self::Off => None,
