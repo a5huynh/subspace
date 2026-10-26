@@ -21,6 +21,7 @@ a web console to create, configure, steer, and observe them.
 - [Crate & Package Structure](#crate--package-structure)
 - [Data Model & Core Entities](#data-model--core-entities)
 - [Server Subsystems](#server-subsystems)
+- [Teams, Workspaces & DMs](#teams-workspaces--dms)
 - [Event Model](#event-model)
 - [API Surface](#api-surface)
 - [Guardrails, Policies & Approvals](#guardrails-policies--approvals)
@@ -53,7 +54,8 @@ The product is a "team of agents you manage," not a library you embed.
 
 - **Worker** — a persistent, named, independently-operating agent (think: an employee).
   It has a role (system prompt), bound integrations, private memory/history, and a
-  lifecycle that outlives any single task. Workers do not share conversation state.
+  lifecycle that outlives any single task. Each worker keeps its own model context; what
+  workers share is a workspace's public transcript, never each other's sessions.
 - **Worker Home** — a per-worker directory holding everything *authored* about the worker:
   config (`worker.toml`), persona (`ROLE.md`), skills, and private memory notes. Copying a
   home clones the agent. Runtime state (history, events, approvals, credentials) lives in
@@ -62,6 +64,15 @@ The product is a "team of agents you manage," not a library you embed.
   instructions) plus optional supporting files. Only the name/description are injected;
   the worker reads the body on demand (progressive disclosure). Skills are resolved by
   layered lookup: worker → global → built-in.
+- **Team** — a top-level container (like a Slack workspace) holding workspaces and the
+  workers that may join them. A worker can belong to any number of teams. One default
+  team, **General**, exists to start with.
+- **Workspace** — collaborative context for a piece of work: a named, shared transcript
+  inside a team whose members are the human operator plus some workers. Workers reply
+  when @mentioned, including by each other, which is how agents talk to one another; an
+  operator post that mentions nobody goes to the best-suited member.
+- **DM** — the private 1:1 conversation between the operator and one worker (the original
+  "chat with a worker"). Every worker has exactly one.
 - **Mailbox** — a per-worker input queue. Both user prompts and routed integration events
   land here as **Stimuli**. The worker's agent loop consumes the mailbox; it does not care
   whether an item came from a human or a webhook. This is the primitive that unifies
@@ -204,7 +215,7 @@ struct WorkerConfig {
     name: String,                 // "Secretary" (display only; dirs are keyed by id)
     description: String,          // one line: what this worker is good at (used for routing)
     role: String,                 // system prompt / persona — contents of ROLE.md
-    model: String,                // defaults to engine default (claude-opus-4-8)
+    model: String,                // defaults to engine default (claude-opus-5-5)
     thinking: ThinkingLevel,      // engine type
     policies: Vec<PolicyRule>,    // action approval rules
     skills: SkillSelection,       // [skills] disabled = [...]; default: all enabled
@@ -498,11 +509,111 @@ hook — TBD in Phase D.)
 
 ### History & Compaction
 
-A worker's conversation is continuous: history is reloaded on boot and appended forever.
+A worker has one *session* (model context) per conversation: its DM, plus one per workspace
+it takes part in (see [Teams, Workspaces & DMs](#teams-workspaces--dms)). Each
+session is continuous: history is reloaded on demand and appended forever.
 To keep context bounded, `ControlMsg::Compact` (also triggered automatically past a token
 threshold) summarizes older turns into a compaction record and starts a fresh working
 context. The full transcript stays in `messages`; only the agent's working context is
-replaced. A "new task" is a compaction, never a fork into a separate conversation.
+replaced. A "new task" in a DM is a compaction; separate pieces of work get a workspace.
+
+---
+
+## Teams, Workspaces & DMs
+
+A **team** contains **workspaces**; a workspace is the shared context for one piece of
+work, and its members (the operator plus some workers) collaborate in one transcript. The
+operator's private 1:1 chat with a worker is its **DM**.
+
+Workspaces borrow Slack's interaction model (mentions, a shared transcript) but are not
+chat channels: each is scoped to a piece of work, which is why shared files (Deferred)
+belong to the workspace. Names are free-form ("Q3 launch plan"): whitespace is tidied,
+names are unique within a team, and at most 80 characters.
+
+### Membership
+
+- Teams ↔ workers is many-to-many. A new worker joins **General** (the default,
+  seeded on first boot); existing workers with no team are added to it on boot.
+- A workspace belongs to one team; its worker members must be members of that
+  team. Removing a worker from a team removes it from that team's workspaces.
+- The operator is an implicit member of every workspace (single-tenant, no auth).
+- Each member has a **handle** used for mentions: the slugified worker name (`Research
+  Bot` → `@research-bot`). Handles must be unique within a workspace; adding a worker whose
+  handle collides is rejected. The operator's handle is `@you`.
+
+### Public transcript vs. private sessions
+
+Two records, kept separate:
+
+1. **Posts**: the workspace's public transcript (`workspace_posts`): author (operator or
+   worker, with the author's name captured at post time), text, mentions, and routing data.
+   Everyone sees these.
+2. **Sessions**: each worker's private model context *for that workspace* (rows in
+   `messages` with `conversation = workspace:<id>`), including its tool calls and results.
+   Other members only see the final reply.
+
+A worker's DM is the conversation `dm`. The engine is unchanged: one `Agent` per worker,
+and the worker swaps the agent's messages when it switches conversations
+(`Agent::replace_messages`). The engine still sees only user/assistant turns; speaker
+attribution lives in the text.
+
+### A workspace turn
+
+When a worker is woken in a workspace (`Stimulus::WorkspaceTurn`), it:
+
+1. Collects the posts since its last turn (`workspace_members.last_seen_seq`), excluding
+   its own. A first turn (or a long gap) is capped at the most recent 50 posts, with a
+   note that earlier posts were omitted. If there is nothing new, the turn is skipped,
+   which de-duplicates repeated wakes.
+2. Prompts its workspace session with one user message:
+   ```
+   <workspace name="Launch plan" team="General">
+   Members: @you (human operator), @researcher (Researcher: finds facts), @writer (Writer: drafts copy)
+   You are @writer.
+   New posts:
+   [@you] @researcher what changed in v2?
+   [@researcher] Three things: ...  @writer can you draft the announcement?
+   </workspace>
+   Reply with your next post in this workspace. Mention @handle to ask a member to respond.
+   ```
+3. Posts the final assistant text of the run as its reply. A run that fails produces a
+   workspace notice instead of a post.
+
+Live activity (text deltas, tool calls) streams on the workspace's event log while the
+worker runs, so viewers watch it work; afterwards the post holds only the text.
+
+### Routing and loop safety
+
+- **Mentions are explicit routing.** A post wakes the members it @mentions, except its
+  author.
+- **Unaddressed operator posts are auto-routed.** When the operator mentions nobody, the
+  hub picks one running member to answer:
+  - none running → nobody; one → that worker (no model call);
+  - two or more → one quick call to the **router model** (`--router-model`, default
+    `claude-haiku-5-5`). It sees each member's handle, name, description, and the start
+    of its role (600 chars), plus the last 10 posts, so follow-ups go to whoever is already
+    on it. It answers `{"handle": ..., "reason": ...}`, or `handle: null` when the post needs
+    no reply (thanks, FYIs).
+
+  The decision is stored on the post (`routing`: `direct` / `pending` / `chosen` /
+  `nobody` / `failed`) and published as a `Routed` event; the console shows "→ Writer ·
+  reason". Routing runs in the background, so posting stays instant. A failed or unusable
+  answer wakes nobody and leaves a notice asking for an @mention.
+- **Worker replies are never auto-routed**: a reply that mentions nobody ends the chain.
+- **Hop limit.** Each operator post starts a chain (`root_id`, `hops = 0`). A worker's
+  reply carries `hops = trigger.hops + 1`. When a reply at `hops ≥ HOP_LIMIT` (default
+  **5**) mentions workers, they are not woken; a notice says the chain stopped and the
+  operator can continue it by posting.
+- **One thing at a time.** A worker's mailbox is still serial: a mention while it is busy
+  in its DM (or another workspace) waits in line. Delivery between workers never blocks a
+  worker's loop (a full mailbox drops the wake with a notice).
+
+### Deferred (wanted)
+
+- **Workspace files**: a shared folder per workspace that members can read and write (like
+  Slack canvases). Planned; likely lands with Phase E's memory/wiki work.
+- `@all` mentions; a tool-call summary attached to posts; multiple teams in the
+  console (the data model and API already allow them).
 
 ---
 
@@ -530,8 +641,29 @@ enum WorkerEvent {
 }
 ```
 
-- Cross-worker isolation: no shared event stream between workers; the console subscribes
-  per worker (or to a filtered global feed).
+- A worker's event log carries its DM activity plus status changes. Activity from a
+  workspace run goes to that **workspace's** event log instead, wrapped with the worker id:
+
+```rust
+struct WorkspaceEvent {
+    workspace_id: WorkspaceId,
+    seq: u64,                 // monotonic per workspace
+    ts: DateTime<Utc>,
+    inner: WorkspaceEventKind,
+}
+
+enum WorkspaceEventKind {
+    Post(WorkspacePost),                            // persisted, stable id
+    Routed { post_id: Id, routing: Routing },     // who answers an unaddressed post
+    Notice(Notice),                               // run failure, hop limit, ...
+    Worker { worker_id: WorkerId, event: WorkerEvent },  // live run activity
+    Changed,                                      // name/topic/members changed: refetch
+    Deleted,
+}
+```
+
+- Clients resume either log with `since` + `epoch`. A workspace's resume cursor points before
+  the earliest run still in progress, so a reconnect replays every active run in full.
 - `seq` enables reconnect/replay so the console can catch up after a dropped socket.
 - This is also the on-the-wire payload for WS, and the serialization target that the old
   "RPC mode" was reaching for — now with worker addressing.
@@ -553,6 +685,14 @@ enum WorkerEvent {
 | `POST /workers/{id}/pause` · `/resume` | lifecycle control |
 | `GET /workers/{id}/history` | conversation/message history |
 | `GET /workers/{id}/memory` | browse private memory |
+| `GET /teams` | list teams |
+| `GET /teams/{id}` | team detail: members + workspaces |
+| `POST /teams/{id}/members` · `DELETE …/members/{worker}` | add / remove a worker |
+| `POST /teams/{id}/workspaces` | create a workspace (name, topic, initial members) |
+| `GET /workspaces/{id}` | workspace detail, members, posts, notices, stream cursor |
+| `PATCH /workspaces/{id}` · `DELETE /workspaces/{id}` | rename / set topic · delete |
+| `POST /workspaces/{id}/members` · `DELETE …/members/{worker}` | workspace membership |
+| `POST /workspaces/{id}/posts` | post as the operator (routes mentions) |
 | `GET /integrations` | available integrations + manifests |
 | `POST /workers/{id}/integrations` | bind an integration + store credentials |
 | `DELETE /workers/{id}/integrations/{integration}` | unbind |
@@ -567,6 +707,7 @@ enum WorkerEvent {
 ### Streaming
 
 - `GET /workers/{id}/stream` — WebSocket (or SSE) of `ServerEvent`s for one worker.
+- `GET /workspaces/{id}/stream` — WebSocket of `WorkspaceEvent`s for one workspace.
 - `GET /stream` — filtered global feed across workers.
 - Clients send `?since={seq}` to resume.
 
@@ -608,8 +749,12 @@ struct PolicyRule {
 
 Responsibilities (React + Vite + TypeScript):
 
-- **Workers**: list/create/configure; per-worker view with live activity stream.
-- **Chat**: talk to a worker; see thinking, tool calls, and results in real time.
+- **Layout** (Slack-shaped): a sidebar with the team, its **Workspaces**, and **Direct
+  messages** (one per worker).
+- **Workers**: list/create/configure; the DM view shows live activity.
+- **Chat**: DM a worker; see thinking, tool calls, and results in real time.
+- **Workspaces**: create, set topic, manage members; a shared transcript with author names,
+  @mention autocomplete, and each responding worker's live activity.
 - **Integrations**: browse available integrations, bind them to a worker, enter
   credentials (write-only), manage subscriptions/triggers.
 - **Wiki**: browse/edit shared knowledge; review & approve/reject worker-proposed edits;
@@ -636,10 +781,15 @@ for wiring and state.
 | `legacy_workers` | A3 rows not yet moved into homes; drained on `boot()` (home created first, then index + delete in one transaction). Unconvertible rows are logged and left in place. |
 | `worker_integrations` | worker_id, integration, credential_ref |
 | `subscriptions` | id, worker_id, integration, event_kind, filter(json) |
-| `messages` | id, worker_id, role, content(json), ts — conversation history |
+| `messages` | id, worker_id, conversation (`dm` or `workspace:<id>`), role, content(json), ts — each worker's private sessions |
+| `teams` | id, name, created_at; `General` seeded on first boot |
+| `team_members` | team_id, worker_id, joined_at |
+| `workspaces` | id, team_id, name (unique per team), topic, created_at |
+| `workspace_members` | workspace_id, worker_id, last_seen_seq, joined_at |
+| `workspace_posts` | seq, id, workspace_id, author_kind, author_id, author_name, text, mentions(json), root_id, hops, routing(json), created_at |
 | `memory_notes` | id, worker_id, path, text, tags(json), ts — FTS5 **index** over `memory/*.md` |
 | `compactions` | id, worker_id, summary, through_seq, ts |
-| `notices` | id, worker_id, level (warning/error), text, created_at; run errors shown to humans, never sent to the model |
+| `notices` | id, worker_id, conversation, level (warning/error), text, created_at; run errors shown to humans, never sent to the model |
 | `wiki_docs` | path, title, current_rev |
 | `wiki_revisions` | id, path, content, author (worker/human), status(proposed/approved), ts |
 | `credentials` | worker_id, integration, ciphertext, nonce |
@@ -659,10 +809,11 @@ initially (see Deferred).
 | **A** | Persistence (SQLite) + `Worker` + `WorkerManager`; one worker, interactive via a minimal API | long-lived, stateful loop |
 | **A4 (done)** | Worker Home: `worker.toml` + `ROLE.md` as source of truth, `workers` table as index, migrate A3 rows to homes; skill discovery + injection; home-scoped file tools | identity is portable files |
 | **B (done)** | Server API (REST + WS) + minimal web console: create worker, chat, watch live events | usable interactively |
+| **B2** | Teams & workspaces: default team, workspaces with shared transcripts, mention routing with a hop limit, DMs as today's chat; Slack-style console | agents collaborate in shared context |
 | **C** | Integration framework (actions + credential/secret store) + **email** integration end-to-end (actions only) | worker acts on a real service |
 | **D** | Trigger Router (webhook ingress + pollers + subscriptions) + action approval checkpoint | **secretary reacts to incoming email** |
 | **E** | Memory: private memory tools + shared wiki (FTS + versioned propose/approve) + console curation | knowledge substrate |
-| **F** | Multi-worker coordination: ephemeral delegation (agents-as-tools) + durable handoffs (task table / mailbox messages), routed by worker `description` | the "workforce" |
+| **F** | Multi-worker coordination beyond workspaces: ephemeral delegation (agents-as-tools) + durable handoffs (task table), routed by worker `description` | the "workforce" |
 | **Later** | more integrations, MCP integration interface, semantic search, tool sandboxing, additional providers | scale/hardening |
 
 `A → B → C → D` is the fastest path to the compelling demo: a secretary that reacts to
@@ -705,7 +856,10 @@ incoming email *and* answers questions about it. `E` and `F` enrich from there.
   (container/namespace) is a hardening item.
 - **Semantic memory.** FTS first; vector embeddings + a store is a later, dependency-heavy
   upgrade.
-- **Cross-worker protocol (Phase F).** Leaning toward *both*: agents-as-tools for short,
+- **Workspace files.** Wanted: a shared folder per workspace (see
+  [Teams, Workspaces & DMs](#deferred-wanted)).
+- **Cross-worker protocol (Phase F).** Workspaces (B2) already let workers hand work to each
+  other in the open. Beyond that, leaning toward *both*: agents-as-tools for short,
   ephemeral delegation whose result returns to the caller's context, plus a durable task
   table (or mailbox messages) for handoffs that must survive crashes, retry, and be
   visible/editable by humans. Open: whether the durable path is a task board or plain
@@ -740,5 +894,5 @@ incoming email *and* answers questions about it. `E` and `F` enrich from there.
 | React + Vite + TypeScript | web console | **approved** (separate `console/` package) |
 | `toml` | parse/write `worker.toml` | **approved** |
 
-Already in the workspace and reused: `tokio`, `reqwest`, `serde`/`serde_json`, `clap`,
+Already in the Cargo workspace and reused: `tokio`, `reqwest`, `serde`/`serde_json`, `clap`,
 `anyhow`/`thiserror`, `async-trait`, `chrono`, `uuid`, `tracing`, `dirs`, `tokio-util`.

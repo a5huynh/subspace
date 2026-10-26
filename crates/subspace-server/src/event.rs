@@ -1,7 +1,7 @@
-//! Events emitted by workers, wrapped with attribution for the console, plus
-//! the per-worker [`EventLog`] that numbers, buffers, and publishes them.
+//! Events emitted by workers and workspaces, wrapped with attribution for the
+//! console, plus the [`EventLog`] that numbers, buffers, and publishes them.
 
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::sync::Mutex;
 
 use chrono::{DateTime, Utc};
@@ -13,6 +13,7 @@ use ts_rs::TS;
 
 use crate::WorkerId;
 use crate::worker::WorkerStatus;
+use crate::workspace::{Routing, WorkspaceId, WorkspacePost};
 
 /// How many recent events each worker keeps for stream replay.
 pub const EVENT_BUFFER_CAPACITY: usize = 4096;
@@ -76,61 +77,157 @@ impl Notice {
     }
 }
 
+/// An event in a workspace's log: posts, notices, and the live activity of
+/// workers taking a turn there.
+#[derive(Debug, Clone, Serialize, TS)]
+pub struct WorkspaceEvent {
+    pub workspace_id: WorkspaceId,
+    /// Monotonic per-workspace sequence number, starting at 1 (per epoch).
+    pub seq: u64,
+    pub ts: DateTime<Utc>,
+    pub inner: WorkspaceEventKind,
+}
+
+#[derive(Debug, Clone, Serialize, TS)]
+#[serde(tag = "type", content = "data", rename_all = "snake_case")]
+pub enum WorkspaceEventKind {
+    /// A post was persisted (stable id; merge with fetched posts).
+    Post(WorkspacePost),
+    /// An operator post's routing was decided (or failed).
+    Routed { post_id: String, routing: Routing },
+    /// A persisted notice: a failed turn, the hop limit, an undeliverable wake.
+    Notice(Notice),
+    /// Live activity from a worker taking its turn in this workspace.
+    Worker {
+        worker_id: WorkerId,
+        event: WorkerEvent,
+    },
+    /// Name, topic, or membership changed; refetch the workspace.
+    Changed,
+    /// The workspace was deleted.
+    Deleted,
+}
+
+/// An event type an [`EventLog`] can number, buffer, and publish.
+pub trait LogEvent: Clone + Send + Sync + 'static {
+    type Inner;
+
+    fn wrap(source: &str, seq: u64, inner: Self::Inner) -> Self;
+    fn seq(&self) -> u64;
+    /// Whether this event starts (`true`) or ends (`false`) a run, keyed so
+    /// a log can track several concurrent runs.
+    fn run_edge(inner: &Self::Inner) -> Option<(String, bool)>;
+}
+
+impl LogEvent for ServerEvent {
+    type Inner = WorkerEvent;
+
+    fn wrap(source: &str, seq: u64, inner: WorkerEvent) -> Self {
+        Self {
+            worker_id: source.to_string(),
+            seq,
+            ts: Utc::now(),
+            inner,
+        }
+    }
+
+    fn seq(&self) -> u64 {
+        self.seq
+    }
+
+    fn run_edge(inner: &WorkerEvent) -> Option<(String, bool)> {
+        match inner {
+            WorkerEvent::StatusChanged(status) => {
+                Some((String::new(), *status == WorkerStatus::Running))
+            }
+            _ => None,
+        }
+    }
+}
+
+impl LogEvent for WorkspaceEvent {
+    type Inner = WorkspaceEventKind;
+
+    fn wrap(source: &str, seq: u64, inner: WorkspaceEventKind) -> Self {
+        Self {
+            workspace_id: source.to_string(),
+            seq,
+            ts: Utc::now(),
+            inner,
+        }
+    }
+
+    fn seq(&self) -> u64 {
+        self.seq
+    }
+
+    fn run_edge(inner: &WorkspaceEventKind) -> Option<(String, bool)> {
+        match inner {
+            WorkspaceEventKind::Worker {
+                worker_id,
+                event: WorkerEvent::StatusChanged(status),
+            } => Some((worker_id.clone(), *status == WorkerStatus::Running)),
+            _ => None,
+        }
+    }
+}
+
 /// What a new stream subscriber should do before consuming live events.
-pub enum Replay {
+pub enum Replay<E = ServerEvent> {
     /// Send these buffered events (all with `seq > since`), then go live.
-    Events(Vec<ServerEvent>),
+    Events(Vec<E>),
     /// Events after `since` are no longer buffered; the client must refetch
     /// history and resubscribe from a fresh cursor.
     Gap,
 }
 
-struct LogState {
+struct LogState<E> {
     next_seq: u64,
-    buffer: VecDeque<ServerEvent>,
-    /// While a run is in progress, the cursor from just before it started.
-    run_start: Option<u64>,
+    buffer: VecDeque<E>,
+    /// Runs in progress, each with the cursor from just before it started.
+    runs: HashMap<String, u64>,
 }
 
-/// Numbers, buffers, and publishes one worker's events. Kept across worker
-/// restarts so `seq` never goes backwards within an epoch.
-pub struct EventLog {
-    worker_id: WorkerId,
-    bus: broadcast::Sender<ServerEvent>,
-    state: Mutex<LogState>,
+/// Numbers, buffers, and publishes one source's events (a worker's or a
+/// workspace's). Kept across worker restarts so `seq` never goes backwards
+/// within an epoch.
+pub struct EventLog<E: LogEvent = ServerEvent> {
+    source: String,
+    bus: broadcast::Sender<E>,
+    state: Mutex<LogState<E>>,
 }
 
-impl EventLog {
-    pub fn new(worker_id: WorkerId, bus: broadcast::Sender<ServerEvent>) -> Self {
+/// A workspace's event log.
+pub type WorkspaceLog = EventLog<WorkspaceEvent>;
+
+impl<E: LogEvent> EventLog<E> {
+    pub fn new(source: impl Into<String>, bus: broadcast::Sender<E>) -> Self {
         Self {
-            worker_id,
+            source: source.into(),
             bus,
             state: Mutex::new(LogState {
                 next_seq: 1,
                 buffer: VecDeque::new(),
-                run_start: None,
+                runs: HashMap::new(),
             }),
         }
     }
 
     /// Assign the next `seq`, buffer the event, and publish it. Holding the
     /// lock across publish keeps `subscribe` gap-free.
-    pub fn emit(&self, inner: WorkerEvent) {
+    pub fn emit(&self, inner: E::Inner) {
         let mut state = self.state.lock().unwrap();
-        match &inner {
-            WorkerEvent::StatusChanged(WorkerStatus::Running) if state.run_start.is_none() => {
-                state.run_start = Some(state.next_seq - 1);
+        match E::run_edge(&inner) {
+            Some((key, true)) => {
+                let before = state.next_seq - 1;
+                state.runs.entry(key).or_insert(before);
             }
-            WorkerEvent::StatusChanged(WorkerStatus::Running) => {}
-            WorkerEvent::StatusChanged(_) => state.run_start = None,
-            _ => {}
+            Some((key, false)) => {
+                state.runs.remove(&key);
+            }
+            None => {}
         }
-        let ev = ServerEvent {
-            worker_id: self.worker_id.clone(),
-            seq: state.next_seq,
-            ts: Utc::now(),
-            inner,
-        };
+        let ev = E::wrap(&self.source, state.next_seq, inner);
         state.next_seq += 1;
         state.buffer.push_back(ev.clone());
         if state.buffer.len() > EVENT_BUFFER_CAPACITY {
@@ -141,20 +238,25 @@ impl EventLog {
     }
 
     /// The `seq` a client should resume from after fetching history: the
-    /// latest event, or (mid-run) just before the current run started, so the
-    /// in-progress run is replayed in full.
+    /// latest event, or (mid-run) just before the earliest run in progress
+    /// started, so in-progress runs are replayed in full.
     pub fn cursor(&self) -> u64 {
         let state = self.state.lock().unwrap();
-        state.run_start.unwrap_or(state.next_seq - 1)
+        state
+            .runs
+            .values()
+            .min()
+            .copied()
+            .unwrap_or(state.next_seq - 1)
     }
 
     /// Atomically snapshot events after `since` and subscribe to live ones.
-    /// The receiver carries every worker's events; callers filter by id.
-    pub fn subscribe(&self, since: u64) -> (Replay, broadcast::Receiver<ServerEvent>) {
+    /// The receiver carries every source's events; callers filter by id.
+    pub fn subscribe(&self, since: u64) -> (Replay<E>, broadcast::Receiver<E>) {
         let state = self.state.lock().unwrap();
         let rx = self.bus.subscribe();
         let last = state.next_seq - 1;
-        let oldest = state.buffer.front().map_or(state.next_seq, |e| e.seq);
+        let oldest = state.buffer.front().map_or(state.next_seq, |e| e.seq());
         let replay = if since > last {
             // A cursor from the future can't belong to this log.
             Replay::Gap
@@ -165,7 +267,7 @@ impl EventLog {
                 state
                     .buffer
                     .iter()
-                    .filter(|e| e.seq > since)
+                    .filter(|e| e.seq() > since)
                     .cloned()
                     .collect(),
             )

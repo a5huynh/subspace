@@ -1,15 +1,24 @@
 // Typed client for the subspace-server API. Wire types come from
 // `./generated` (ts-rs); regenerate them from Rust, don't edit them by hand.
 
+import type { Workspace } from './generated/Workspace'
+import type { WorkspaceDetail } from './generated/WorkspaceDetail'
+import type { WorkspaceEvent } from './generated/WorkspaceEvent'
+import type { WorkspacePost } from './generated/WorkspacePost'
+import type { WorkspaceStreamMessage } from './generated/WorkspaceStreamMessage'
+import type { CreateWorkspace } from './generated/CreateWorkspace'
 import type { CreateWorker } from './generated/CreateWorker'
 import type { ErrorBody } from './generated/ErrorBody'
 import type { Health } from './generated/Health'
 import type { History } from './generated/History'
 import type { ServerEvent } from './generated/ServerEvent'
 import type { StreamMessage } from './generated/StreamMessage'
+import type { UpdateWorkspace } from './generated/UpdateWorkspace'
 import type { UpdateWorker } from './generated/UpdateWorker'
 import type { WorkerDetail } from './generated/WorkerDetail'
 import type { WorkerSummary } from './generated/WorkerSummary'
+import type { Team } from './generated/Team'
+import type { TeamDetail } from './generated/TeamDetail'
 
 /** A non-2xx API response, carrying the server's `{"error": ...}` message. */
 export class ApiRequestError extends Error {
@@ -44,6 +53,8 @@ async function request<T>(method: string, path: string, body?: unknown): Promise
 }
 
 const worker = (id: string) => `/api/workers/${encodeURIComponent(id)}`
+const team = (id: string) => `/api/teams/${encodeURIComponent(id)}`
+const workspace = (id: string) => `/api/workspaces/${encodeURIComponent(id)}`
 
 export const api = {
   health: () => request<Health>('GET', '/api/health'),
@@ -55,11 +66,24 @@ export const api = {
   deleteWorker: (id: string) => request<void>('DELETE', worker(id)),
   prompt: (id: string, text: string) => request<void>('POST', `${worker(id)}/prompt`, { text }),
   history: (id: string) => request<History>('GET', `${worker(id)}/history`),
+
+  listTeams: () => request<Team[]>('GET', '/api/teams'),
+  getTeam: (id: string) => request<TeamDetail>('GET', team(id)),
+  createWorkspace: (teamId: string, body: CreateWorkspace) =>
+    request<Workspace>('POST', `${team(teamId)}/workspaces`, body),
+  getWorkspace: (id: string) => request<WorkspaceDetail>('GET', workspace(id)),
+  updateWorkspace: (id: string, body: UpdateWorkspace) => request<Workspace>('PATCH', workspace(id), body),
+  deleteWorkspace: (id: string) => request<void>('DELETE', workspace(id)),
+  addWorkspaceMember: (id: string, workerId: string) =>
+    request<void>('POST', `${workspace(id)}/members`, { worker_id: workerId }),
+  removeWorkspaceMember: (id: string, workerId: string) =>
+    request<void>('DELETE', `${workspace(id)}/members/${encodeURIComponent(workerId)}`),
+  post: (id: string, text: string) => request<WorkspacePost>('POST', `${workspace(id)}/posts`, { text }),
 }
 
-export interface StreamHandlers {
+export interface StreamHandlers<E> {
   /** Every event, in `seq` order, replayed ones first. */
-  onEvent: (event: ServerEvent) => void
+  onEvent: (event: E) => void
   /**
    * The stream can't be caught up (server restarted, too far behind).
    * Refetch history and open a new stream from its cursor.
@@ -69,19 +93,44 @@ export interface StreamHandlers {
   onConnectionChange?: (connected: boolean) => void
 }
 
+/** Where to resume a stream: from `api.history` or `api.getWorkspace`. */
+export interface StreamStart {
+  cursor: number
+  epoch: string
+}
+
+type Frame<E> = { type: 'hello' } | { type: 'event'; event: E } | { type: 'resync'; reason: string }
+
 const RECONNECT_MIN_MS = 500
 const RECONNECT_MAX_MS = 10_000
 
 /**
- * Open a worker's event stream starting after `cursor` (from `api.history`).
+ * Open a worker's event stream starting after `from.cursor`.
  * Unexpected disconnects reconnect automatically from the last seen `seq`,
  * with backoff; a `resync` frame stops the stream and calls `onResync`.
  * Returns a function that closes the stream for good.
  */
 export function openWorkerStream(
   id: string,
-  from: Pick<History, 'cursor' | 'epoch'>,
-  handlers: StreamHandlers,
+  from: StreamStart,
+  handlers: StreamHandlers<ServerEvent>,
+): () => void {
+  return openStream<ServerEvent, StreamMessage>(`${worker(id)}/stream`, from, handlers)
+}
+
+/** Open a workspace's event stream (same behavior as `openWorkerStream`). */
+export function openWorkspaceStream(
+  id: string,
+  from: StreamStart,
+  handlers: StreamHandlers<WorkspaceEvent>,
+): () => void {
+  return openStream<WorkspaceEvent, WorkspaceStreamMessage>(`${workspace(id)}/stream`, from, handlers)
+}
+
+function openStream<E extends { seq: number }, F extends Frame<E>>(
+  path: string,
+  from: StreamStart,
+  handlers: StreamHandlers<E>,
 ): () => void {
   let since = from.cursor
   const epoch = from.epoch
@@ -93,11 +142,11 @@ export function openWorkerStream(
   const connect = () => {
     const proto = location.protocol === 'https:' ? 'wss:' : 'ws:'
     const query = new URLSearchParams({ since: String(since), epoch })
-    const ws = new WebSocket(`${proto}//${location.host}${worker(id)}/stream?${query}`)
+    const ws = new WebSocket(`${proto}//${location.host}${path}?${query}`)
     socket = ws
 
     ws.onmessage = (msg) => {
-      const frame = JSON.parse(msg.data as string) as StreamMessage
+      const frame = JSON.parse(msg.data as string) as F
       switch (frame.type) {
         case 'hello':
           retryMs = RECONNECT_MIN_MS

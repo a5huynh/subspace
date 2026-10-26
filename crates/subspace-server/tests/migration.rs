@@ -234,3 +234,73 @@ async fn unconvertible_rows_are_left_in_place() {
 
     let _ = fs::remove_dir_all(&data);
 }
+
+/// A database at migration 0005 (as Phase B2 shipped it, with channels) is
+/// upgraded in place: tables renamed, data and session keys carried over.
+#[tokio::test]
+async fn channels_become_workspaces_and_workspaces_become_teams() {
+    let data = data_dir();
+    let opts = SqliteConnectOptions::from_str(&db_url(&data))
+        .unwrap()
+        .create_if_missing(true);
+    let pool = SqlitePool::connect_with(opts).await.unwrap();
+    let mut through_b2 = sqlx::migrate!();
+    through_b2.migrations = through_b2
+        .migrations
+        .iter()
+        .filter(|m| m.version <= 5)
+        .cloned()
+        .collect::<Vec<_>>()
+        .into();
+    through_b2.run(&pool).await.unwrap();
+
+    let ts = "2026-01-01T00:00:00+00:00";
+    for sql in [
+        format!("INSERT INTO workspaces (id, name, created_at) VALUES ('ws1', 'General', '{ts}')"),
+        format!("INSERT INTO workspace_members (workspace_id, worker_id, joined_at) VALUES ('ws1', 'w1', '{ts}')"),
+        format!("INSERT INTO channels (id, workspace_id, name, topic, created_at) VALUES ('c1', 'ws1', 'launch', 'Ship it', '{ts}')"),
+        format!("INSERT INTO channel_members (channel_id, worker_id, last_seen_seq, joined_at) VALUES ('c1', 'w1', 1, '{ts}')"),
+        format!(
+            "INSERT INTO channel_posts (id, channel_id, author_kind, author_id, author_name, text, mentions, root_id, hops, routing, created_at)
+             VALUES ('p1', 'c1', 'operator', NULL, 'You', 'hello', '[]', 'p1', 0, '{{\"state\":\"direct\"}}', '{ts}')"
+        ),
+        format!("INSERT INTO messages (worker_id, conversation, data, created_at) VALUES ('w1', 'channel:c1', '{}', '{ts}')",
+            serde_json::to_string(&subspace::types::Message::user("in channel")).unwrap()),
+        format!("INSERT INTO messages (worker_id, conversation, data, created_at) VALUES ('w1', 'dm', '{}', '{ts}')",
+            serde_json::to_string(&subspace::types::Message::user("in dm")).unwrap()),
+        format!("INSERT INTO notices (id, worker_id, conversation, level, text, created_at) VALUES ('n1', 'w1', 'channel:c1', '\"error\"', 'boom', '{ts}')"),
+    ] {
+        sqlx::query(&sql).execute(&pool).await.unwrap();
+    }
+    pool.close().await;
+
+    // Opening the store applies 0006.
+    let store = SqliteStore::connect(&db_url(&data)).await.unwrap();
+    use subspace_server::workspace::Conversation;
+    let teams = store.list_teams().await.unwrap();
+    assert_eq!(
+        (teams[0].id.as_str(), teams[0].name.as_str()),
+        ("ws1", "General")
+    );
+    assert_eq!(store.team_members("ws1").await.unwrap(), ["w1"]);
+    let ws = store.get_workspace("c1").await.unwrap().unwrap();
+    assert_eq!(
+        (ws.team_id.as_str(), ws.name.as_str(), ws.topic.as_str()),
+        ("ws1", "launch", "Ship it")
+    );
+    assert_eq!(store.workspace_members("c1").await.unwrap(), ["w1"]);
+    assert_eq!(store.last_seen("c1", "w1").await.unwrap(), Some(1));
+    assert_eq!(store.list_posts("c1").await.unwrap()[0].text, "hello");
+    let session = Conversation::Workspace("c1".into());
+    assert_eq!(
+        store.load_session("w1", &session).await.unwrap()[0].text(),
+        "in channel"
+    );
+    assert_eq!(store.load_history("w1").await.unwrap()[0].text(), "in dm");
+    assert_eq!(
+        store.load_conversation_notices(&session).await.unwrap()[0].text,
+        "boom"
+    );
+
+    let _ = fs::remove_dir_all(&data);
+}

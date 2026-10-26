@@ -17,7 +17,7 @@ use tokio::sync::broadcast;
 
 fn log() -> (EventLog, broadcast::Sender<ServerEvent>) {
     let (bus, _) = broadcast::channel(64);
-    (EventLog::new("w1".into(), bus.clone()), bus)
+    (EventLog::new("w1", bus.clone()), bus)
 }
 
 fn seqs(replay: Replay) -> Vec<u64> {
@@ -275,4 +275,24 @@ async fn run_errors_are_persisted_as_notices_but_never_sent_to_the_model() {
     assert!(store.load_notices(&id).await.unwrap().is_empty());
 
     let _ = fs::remove_dir_all(&data);
+}
+
+#[test]
+fn workspace_cursor_points_before_the_earliest_active_run() {
+    use subspace_server::event::{WorkspaceEventKind, WorkspaceLog};
+    let (bus, _) = tokio::sync::broadcast::channel(16);
+    let log = WorkspaceLog::new("c1", bus);
+    let status = |worker: &str, s: WorkerStatus| WorkspaceEventKind::Worker {
+        worker_id: worker.into(),
+        event: WorkerEvent::StatusChanged(s),
+    };
+
+    log.emit(WorkspaceEventKind::Changed); // seq 1
+    log.emit(status("a", WorkerStatus::Running)); // seq 2: a's run starts after 1
+    log.emit(status("b", WorkerStatus::Running)); // seq 3: b's run starts after 2
+    assert_eq!(log.cursor(), 1);
+    log.emit(status("a", WorkerStatus::Idle)); // seq 4
+    assert_eq!(log.cursor(), 2, "b is still running");
+    log.emit(status("b", WorkerStatus::Idle)); // seq 5
+    assert_eq!(log.cursor(), 5);
 }

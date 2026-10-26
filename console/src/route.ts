@@ -5,10 +5,19 @@ export type Route =
   | { page: 'new' }
   | { page: 'worker'; id: string }
   | { page: 'settings'; id: string }
+  | { page: 'new-workspace' }
+  | { page: 'workspace'; id: string }
+  | { page: 'workspace-settings'; id: string }
 
 export function parseRoute(hash: string): Route {
   const parts = hash.replace(/^#\/?/, '').split('/').filter(Boolean).map(decodeURIComponent)
   if (parts[0] === 'new') return { page: 'new' }
+  if (parts[0] === 'workspaces' && parts[1] === 'new') return { page: 'new-workspace' }
+  if (parts[0] === 'workspaces' && parts[1]) {
+    return parts[2] === 'settings'
+      ? { page: 'workspace-settings', id: parts[1] }
+      : { page: 'workspace', id: parts[1] }
+  }
   if (parts[0] === 'workers' && parts[1]) {
     return parts[2] === 'settings' ? { page: 'settings', id: parts[1] } : { page: 'worker', id: parts[1] }
   }
@@ -25,6 +34,12 @@ export function href(route: Route): string {
       return `#/workers/${encodeURIComponent(route.id)}`
     case 'settings':
       return `#/workers/${encodeURIComponent(route.id)}/settings`
+    case 'new-workspace':
+      return '#/workspaces/new'
+    case 'workspace':
+      return `#/workspaces/${encodeURIComponent(route.id)}`
+    case 'workspace-settings':
+      return `#/workspaces/${encodeURIComponent(route.id)}/settings`
   }
 }
 

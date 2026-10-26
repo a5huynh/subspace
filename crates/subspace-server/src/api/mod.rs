@@ -1,8 +1,9 @@
-//! HTTP API for the console: REST management under `/api`, plus the worker
-//! event stream (WebSocket). Errors are always JSON: `{"error": "..."}`.
+//! HTTP API for the console: REST management under `/api`, plus worker and
+//! workspace event streams (WebSocket). Errors are always JSON: `{"error": "..."}`.
 
 mod stream;
 mod workers;
+mod workspaces;
 
 use std::sync::Arc;
 
@@ -16,8 +17,11 @@ use ts_rs::TS;
 
 use crate::manager::{ManagerError, WorkerManager};
 
-pub use stream::StreamMessage;
+pub use stream::{StreamMessage, WorkspaceStreamMessage};
 pub use workers::{CreateWorker, PromptRequest, UpdateWorker, WorkerDetail};
+pub use workspaces::{
+    AddMember, CreatePost, CreateWorkspace, TeamDetail, UpdateWorkspace, WorkspaceDetail,
+};
 
 /// Shared state for all handlers.
 pub type AppState = Arc<WorkerManager>;
@@ -27,7 +31,9 @@ pub fn router(manager: Arc<WorkerManager>) -> Router {
     Router::new()
         .route("/api/health", get(health))
         .route("/api/workers/{id}/stream", get(stream::stream))
+        .route("/api/workspaces/{id}/stream", get(stream::workspace_stream))
         .merge(workers::routes())
+        .merge(workspaces::routes())
         .with_state(manager)
 }
 
@@ -75,8 +81,16 @@ impl ApiError {
 impl From<anyhow::Error> for ApiError {
     fn from(err: anyhow::Error) -> Self {
         let status = match err.downcast_ref::<ManagerError>() {
-            Some(ManagerError::NotFound(_)) => StatusCode::NOT_FOUND,
-            Some(ManagerError::AlreadyExists(_) | ManagerError::Busy(_)) => StatusCode::CONFLICT,
+            Some(
+                ManagerError::NotFound(_)
+                | ManagerError::NoSuchTeam(_)
+                | ManagerError::NoSuchWorkspace(_),
+            ) => StatusCode::NOT_FOUND,
+            Some(
+                ManagerError::AlreadyExists(_) | ManagerError::Busy(_) | ManagerError::Conflict(_),
+            ) => StatusCode::CONFLICT,
+            Some(ManagerError::Invalid(_)) => StatusCode::BAD_REQUEST,
+            Some(ManagerError::Unsupported(_)) => StatusCode::NOT_IMPLEMENTED,
             None => {
                 tracing::error!("api error: {err:#}");
                 StatusCode::INTERNAL_SERVER_ERROR

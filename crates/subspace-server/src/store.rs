@@ -7,13 +7,17 @@ use std::path::Path;
 use std::str::FromStr;
 
 use anyhow::Result;
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use sqlx::Row;
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePool, SqlitePoolOptions};
 use subspace::types::Message;
+use subspace::types::new_id;
 
 use crate::event::Notice;
 use crate::worker::WorkerConfig;
+use crate::workspace::{
+    Author, Conversation, DEFAULT_TEAM, Routing, Team, Workspace, WorkspacePost,
+};
 
 /// One row of the worker index.
 #[derive(Debug, Clone)]
@@ -186,6 +190,14 @@ impl SqliteStore {
             .bind(id)
             .execute(&self.pool)
             .await?;
+        sqlx::query("DELETE FROM team_members WHERE worker_id = ?")
+            .bind(id)
+            .execute(&self.pool)
+            .await?;
+        sqlx::query("DELETE FROM workspace_members WHERE worker_id = ?")
+            .bind(id)
+            .execute(&self.pool)
+            .await?;
         sqlx::query("DELETE FROM workers WHERE id = ?")
             .bind(id)
             .execute(&self.pool)
@@ -193,26 +205,55 @@ impl SqliteStore {
         Ok(())
     }
 
-    /// Append messages to a worker's history, in order.
+    /// Append messages to a worker's DM history, in order.
     pub async fn append_messages(&self, worker_id: &str, msgs: &[Message]) -> Result<()> {
+        self.append_session(worker_id, &Conversation::Dm, msgs)
+            .await
+    }
+
+    /// Append messages to one of a worker's sessions, in order.
+    pub async fn append_session(
+        &self,
+        worker_id: &str,
+        conversation: &Conversation,
+        msgs: &[Message],
+    ) -> Result<()> {
         for m in msgs {
-            sqlx::query("INSERT INTO messages (worker_id, data, created_at) VALUES (?, ?, ?)")
-                .bind(worker_id)
-                .bind(serde_json::to_string(m)?)
-                .bind(Utc::now().to_rfc3339())
-                .execute(&self.pool)
-                .await?;
+            sqlx::query(
+                "INSERT INTO messages (worker_id, conversation, data, created_at)
+                 VALUES (?, ?, ?, ?)",
+            )
+            .bind(worker_id)
+            .bind(conversation.key())
+            .bind(serde_json::to_string(m)?)
+            .bind(Utc::now().to_rfc3339())
+            .execute(&self.pool)
+            .await?;
         }
         Ok(())
     }
 
-    /// Record a run error or warning for a worker.
+    /// Record a run error or warning in a worker's DM.
     pub async fn append_notice(&self, worker_id: &str, notice: &Notice) -> Result<()> {
+        self.append_conversation_notice(worker_id, &Conversation::Dm, notice)
+            .await
+    }
+
+    /// Record a notice in a conversation. `worker_id` is the worker it concerns
+    /// (empty for workspace-wide notices such as the hop limit).
+    pub async fn append_conversation_notice(
+        &self,
+        worker_id: &str,
+        conversation: &Conversation,
+        notice: &Notice,
+    ) -> Result<()> {
         sqlx::query(
-            "INSERT INTO notices (id, worker_id, level, text, created_at) VALUES (?, ?, ?, ?, ?)",
+            "INSERT INTO notices (id, worker_id, conversation, level, text, created_at)
+             VALUES (?, ?, ?, ?, ?, ?)",
         )
         .bind(&notice.id)
         .bind(worker_id)
+        .bind(conversation.key())
         .bind(serde_json::to_string(&notice.level)?)
         .bind(&notice.text)
         .bind(notice.timestamp.to_rfc3339())
@@ -221,35 +262,52 @@ impl SqliteStore {
         Ok(())
     }
 
-    /// A worker's notices, oldest first.
+    /// A worker's DM notices, oldest first.
     pub async fn load_notices(&self, worker_id: &str) -> Result<Vec<Notice>> {
         let rows = sqlx::query(
-            "SELECT id, level, text, created_at FROM notices WHERE worker_id = ?
+            "SELECT id, level, text, created_at FROM notices
+             WHERE worker_id = ? AND conversation = 'dm'
              ORDER BY created_at, id",
         )
         .bind(worker_id)
         .fetch_all(&self.pool)
         .await?;
-        rows.into_iter()
-            .map(|row| {
-                let level: String = row.get("level");
-                let created_at: String = row.get("created_at");
-                Ok(Notice {
-                    id: row.get("id"),
-                    level: serde_json::from_str(&level)?,
-                    text: row.get("text"),
-                    timestamp: chrono::DateTime::parse_from_rfc3339(&created_at)?.to_utc(),
-                })
-            })
-            .collect()
+        notices_from(rows)
     }
 
-    /// Load a worker's full message history, oldest first.
+    /// All notices in a conversation (any worker), oldest first.
+    pub async fn load_conversation_notices(
+        &self,
+        conversation: &Conversation,
+    ) -> Result<Vec<Notice>> {
+        let rows = sqlx::query(
+            "SELECT id, level, text, created_at FROM notices WHERE conversation = ?
+             ORDER BY created_at, id",
+        )
+        .bind(conversation.key())
+        .fetch_all(&self.pool)
+        .await?;
+        notices_from(rows)
+    }
+
+    /// Load a worker's full DM history, oldest first.
     pub async fn load_history(&self, worker_id: &str) -> Result<Vec<Message>> {
-        let rows = sqlx::query("SELECT data FROM messages WHERE worker_id = ? ORDER BY seq")
-            .bind(worker_id)
-            .fetch_all(&self.pool)
-            .await?;
+        self.load_session(worker_id, &Conversation::Dm).await
+    }
+
+    /// Load one of a worker's sessions, oldest first.
+    pub async fn load_session(
+        &self,
+        worker_id: &str,
+        conversation: &Conversation,
+    ) -> Result<Vec<Message>> {
+        let rows = sqlx::query(
+            "SELECT data FROM messages WHERE worker_id = ? AND conversation = ? ORDER BY seq",
+        )
+        .bind(worker_id)
+        .bind(conversation.key())
+        .fetch_all(&self.pool)
+        .await?;
         let mut out = Vec::with_capacity(rows.len());
         for row in rows {
             let data: String = row.get("data");
@@ -257,4 +315,362 @@ impl SqliteStore {
         }
         Ok(out)
     }
+
+    // --- Teams -------------------------------------------------------
+
+    /// The default team (the oldest one), creating `General` if there
+    /// are none yet.
+    pub async fn ensure_default_team(&self) -> Result<Team> {
+        if let Some(ws) = self.list_teams().await?.into_iter().next() {
+            return Ok(ws);
+        }
+        let ws = Team {
+            id: new_id(),
+            name: DEFAULT_TEAM.to_string(),
+            created_at: Utc::now(),
+        };
+        sqlx::query("INSERT INTO teams (id, name, created_at) VALUES (?, ?, ?)")
+            .bind(&ws.id)
+            .bind(&ws.name)
+            .bind(ws.created_at.to_rfc3339())
+            .execute(&self.pool)
+            .await?;
+        Ok(ws)
+    }
+
+    /// All teams, oldest first.
+    pub async fn list_teams(&self) -> Result<Vec<Team>> {
+        let rows = sqlx::query("SELECT id, name, created_at FROM teams ORDER BY created_at, id")
+            .fetch_all(&self.pool)
+            .await?;
+        rows.into_iter()
+            .map(|row| {
+                Ok(Team {
+                    id: row.get("id"),
+                    name: row.get("name"),
+                    created_at: parse_ts(row.get("created_at"))?,
+                })
+            })
+            .collect()
+    }
+
+    pub async fn get_team(&self, id: &str) -> Result<Option<Team>> {
+        Ok(self.list_teams().await?.into_iter().find(|w| w.id == id))
+    }
+
+    /// Add a worker to a team (no-op if already a member).
+    pub async fn add_team_member(&self, team_id: &str, worker_id: &str) -> Result<()> {
+        sqlx::query(
+            "INSERT OR IGNORE INTO team_members (team_id, worker_id, joined_at)
+             VALUES (?, ?, ?)",
+        )
+        .bind(team_id)
+        .bind(worker_id)
+        .bind(Utc::now().to_rfc3339())
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    /// Remove a worker from a team and from all of its workspaces.
+    pub async fn remove_team_member(&self, team_id: &str, worker_id: &str) -> Result<()> {
+        let mut tx = self.pool.begin().await?;
+        sqlx::query(
+            "DELETE FROM workspace_members WHERE worker_id = ?
+             AND workspace_id IN (SELECT id FROM workspaces WHERE team_id = ?)",
+        )
+        .bind(worker_id)
+        .bind(team_id)
+        .execute(&mut *tx)
+        .await?;
+        sqlx::query("DELETE FROM team_members WHERE team_id = ? AND worker_id = ?")
+            .bind(team_id)
+            .bind(worker_id)
+            .execute(&mut *tx)
+            .await?;
+        tx.commit().await?;
+        Ok(())
+    }
+
+    /// Worker ids in a team, in join order.
+    pub async fn team_members(&self, team_id: &str) -> Result<Vec<String>> {
+        let rows = sqlx::query(
+            "SELECT worker_id FROM team_members WHERE team_id = ?
+             ORDER BY joined_at, worker_id",
+        )
+        .bind(team_id)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows.into_iter().map(|row| row.get("worker_id")).collect())
+    }
+
+    /// Teams a worker belongs to.
+    pub async fn worker_teams(&self, worker_id: &str) -> Result<Vec<String>> {
+        let rows = sqlx::query("SELECT team_id FROM team_members WHERE worker_id = ?")
+            .bind(worker_id)
+            .fetch_all(&self.pool)
+            .await?;
+        Ok(rows.into_iter().map(|row| row.get("team_id")).collect())
+    }
+
+    // --- Workspaces ---------------------------------------------------------
+
+    /// Create a workspace. Returns `None` if the team already has a
+    /// workspace with this name.
+    pub async fn create_workspace(
+        &self,
+        team_id: &str,
+        name: &str,
+        topic: &str,
+    ) -> Result<Option<Workspace>> {
+        let workspace = Workspace {
+            id: new_id(),
+            team_id: team_id.to_string(),
+            name: name.to_string(),
+            topic: topic.to_string(),
+            created_at: Utc::now(),
+        };
+        let inserted = sqlx::query(
+            "INSERT OR IGNORE INTO workspaces (id, team_id, name, topic, created_at)
+             VALUES (?, ?, ?, ?, ?)",
+        )
+        .bind(&workspace.id)
+        .bind(&workspace.team_id)
+        .bind(&workspace.name)
+        .bind(&workspace.topic)
+        .bind(workspace.created_at.to_rfc3339())
+        .execute(&self.pool)
+        .await?
+        .rows_affected();
+        Ok((inserted == 1).then_some(workspace))
+    }
+
+    /// Rename a workspace and/or change its topic. Returns `false` if the new
+    /// name is taken in its team.
+    pub async fn update_workspace(&self, id: &str, name: &str, topic: &str) -> Result<bool> {
+        let result =
+            sqlx::query("UPDATE OR IGNORE workspaces SET name = ?, topic = ? WHERE id = ?")
+                .bind(name)
+                .bind(topic)
+                .bind(id)
+                .execute(&self.pool)
+                .await?;
+        Ok(result.rows_affected() == 1)
+    }
+
+    /// Delete a workspace with its posts, memberships, notices, and every
+    /// worker's session for it.
+    pub async fn delete_workspace(&self, id: &str) -> Result<()> {
+        let conversation = Conversation::Workspace(id.to_string()).key();
+        let mut tx = self.pool.begin().await?;
+        for (sql, key) in [
+            ("DELETE FROM workspace_posts WHERE workspace_id = ?", id),
+            ("DELETE FROM workspace_members WHERE workspace_id = ?", id),
+            (
+                "DELETE FROM messages WHERE conversation = ?",
+                conversation.as_str(),
+            ),
+            (
+                "DELETE FROM notices WHERE conversation = ?",
+                conversation.as_str(),
+            ),
+            ("DELETE FROM workspaces WHERE id = ?", id),
+        ] {
+            sqlx::query(sql).bind(key).execute(&mut *tx).await?;
+        }
+        tx.commit().await?;
+        Ok(())
+    }
+
+    pub async fn get_workspace(&self, id: &str) -> Result<Option<Workspace>> {
+        let row =
+            sqlx::query("SELECT id, team_id, name, topic, created_at FROM workspaces WHERE id = ?")
+                .bind(id)
+                .fetch_optional(&self.pool)
+                .await?;
+        row.map(workspace_from).transpose()
+    }
+
+    /// A team's workspaces, by name.
+    pub async fn list_workspaces(&self, team_id: &str) -> Result<Vec<Workspace>> {
+        let rows = sqlx::query(
+            "SELECT id, team_id, name, topic, created_at FROM workspaces
+             WHERE team_id = ? ORDER BY name",
+        )
+        .bind(team_id)
+        .fetch_all(&self.pool)
+        .await?;
+        rows.into_iter().map(workspace_from).collect()
+    }
+
+    /// Add a worker to a workspace (no-op if already a member).
+    pub async fn add_workspace_member(&self, workspace_id: &str, worker_id: &str) -> Result<()> {
+        sqlx::query(
+            "INSERT OR IGNORE INTO workspace_members (workspace_id, worker_id, joined_at)
+             VALUES (?, ?, ?)",
+        )
+        .bind(workspace_id)
+        .bind(worker_id)
+        .bind(Utc::now().to_rfc3339())
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    pub async fn remove_workspace_member(&self, workspace_id: &str, worker_id: &str) -> Result<()> {
+        sqlx::query("DELETE FROM workspace_members WHERE workspace_id = ? AND worker_id = ?")
+            .bind(workspace_id)
+            .bind(worker_id)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    /// Worker ids in a workspace, in join order.
+    pub async fn workspace_members(&self, workspace_id: &str) -> Result<Vec<String>> {
+        let rows = sqlx::query(
+            "SELECT worker_id FROM workspace_members WHERE workspace_id = ?
+             ORDER BY joined_at, worker_id",
+        )
+        .bind(workspace_id)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows.into_iter().map(|row| row.get("worker_id")).collect())
+    }
+
+    /// The last post seq a member has been shown, or `None` if it isn't a member.
+    pub async fn last_seen(&self, workspace_id: &str, worker_id: &str) -> Result<Option<u64>> {
+        let row = sqlx::query(
+            "SELECT last_seen_seq FROM workspace_members WHERE workspace_id = ? AND worker_id = ?",
+        )
+        .bind(workspace_id)
+        .bind(worker_id)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(row.map(|row| row.get::<i64, _>("last_seen_seq") as u64))
+    }
+
+    pub async fn set_last_seen(&self, workspace_id: &str, worker_id: &str, seq: u64) -> Result<()> {
+        sqlx::query(
+            "UPDATE workspace_members SET last_seen_seq = MAX(last_seen_seq, ?)
+             WHERE workspace_id = ? AND worker_id = ?",
+        )
+        .bind(seq as i64)
+        .bind(workspace_id)
+        .bind(worker_id)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    // --- Posts ------------------------------------------------------------
+
+    /// Persist a post, assigning and returning its `seq`.
+    pub async fn append_post(&self, post: &WorkspacePost) -> Result<u64> {
+        let (kind, author_id) = match &post.author {
+            Author::Operator => ("operator", None),
+            Author::Worker(id) => ("worker", Some(id.as_str())),
+        };
+        let row = sqlx::query(
+            "INSERT INTO workspace_posts
+                 (id, workspace_id, author_kind, author_id, author_name, text, mentions,
+                  root_id, hops, routing, created_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             RETURNING seq",
+        )
+        .bind(&post.id)
+        .bind(&post.workspace_id)
+        .bind(kind)
+        .bind(author_id)
+        .bind(&post.author_name)
+        .bind(&post.text)
+        .bind(serde_json::to_string(&post.mentions)?)
+        .bind(&post.root_id)
+        .bind(post.hops as i64)
+        .bind(serde_json::to_string(&post.routing)?)
+        .bind(post.timestamp.to_rfc3339())
+        .fetch_one(&self.pool)
+        .await?;
+        Ok(row.get::<i64, _>("seq") as u64)
+    }
+
+    /// Record how a post was routed.
+    pub async fn set_routing(&self, post_id: &str, routing: &Routing) -> Result<()> {
+        sqlx::query("UPDATE workspace_posts SET routing = ? WHERE id = ?")
+            .bind(serde_json::to_string(routing)?)
+            .bind(post_id)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    /// A workspace's posts, oldest first.
+    pub async fn list_posts(&self, workspace_id: &str) -> Result<Vec<WorkspacePost>> {
+        self.posts_after(workspace_id, 0).await
+    }
+
+    /// A workspace's posts with `seq > after`, oldest first.
+    pub async fn posts_after(&self, workspace_id: &str, after: u64) -> Result<Vec<WorkspacePost>> {
+        let rows = sqlx::query(
+            "SELECT seq, id, workspace_id, author_kind, author_id, author_name, text, mentions,
+                    root_id, hops, routing, created_at
+             FROM workspace_posts WHERE workspace_id = ? AND seq > ? ORDER BY seq",
+        )
+        .bind(workspace_id)
+        .bind(after as i64)
+        .fetch_all(&self.pool)
+        .await?;
+        rows.into_iter()
+            .map(|row| {
+                let author = match row.get::<String, _>("author_kind").as_str() {
+                    "worker" => Author::Worker(row.get("author_id")),
+                    _ => Author::Operator,
+                };
+                let mentions: String = row.get("mentions");
+                let routing: String = row.get("routing");
+                Ok(WorkspacePost {
+                    id: row.get("id"),
+                    workspace_id: row.get("workspace_id"),
+                    seq: row.get::<i64, _>("seq") as u64,
+                    author,
+                    author_name: row.get("author_name"),
+                    text: row.get("text"),
+                    mentions: serde_json::from_str(&mentions)?,
+                    root_id: row.get("root_id"),
+                    hops: row.get::<i64, _>("hops") as u32,
+                    routing: serde_json::from_str(&routing)?,
+                    timestamp: parse_ts(row.get("created_at"))?,
+                })
+            })
+            .collect()
+    }
+}
+
+fn notices_from(rows: Vec<sqlx::sqlite::SqliteRow>) -> Result<Vec<Notice>> {
+    rows.into_iter()
+        .map(|row| {
+            let level: String = row.get("level");
+            let created_at: String = row.get("created_at");
+            Ok(Notice {
+                id: row.get("id"),
+                level: serde_json::from_str(&level)?,
+                text: row.get("text"),
+                timestamp: chrono::DateTime::parse_from_rfc3339(&created_at)?.to_utc(),
+            })
+        })
+        .collect()
+}
+
+fn workspace_from(row: sqlx::sqlite::SqliteRow) -> Result<Workspace> {
+    Ok(Workspace {
+        id: row.get("id"),
+        team_id: row.get("team_id"),
+        name: row.get("name"),
+        topic: row.get("topic"),
+        created_at: parse_ts(row.get("created_at"))?,
+    })
+}
+
+fn parse_ts(raw: String) -> Result<DateTime<Utc>> {
+    Ok(DateTime::parse_from_rfc3339(&raw)?.to_utc())
 }

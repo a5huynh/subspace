@@ -4,6 +4,7 @@ import { ApiRequestError, api } from '../api/client'
 import type { ThinkingLevel } from '../api/generated/ThinkingLevel'
 import type { WorkerConfig } from '../api/generated/WorkerConfig'
 import { navigate } from '../route'
+import { Panel } from './ui'
 
 const THINKING: ThinkingLevel[] = ['off', 'low', 'medium', 'high']
 
@@ -64,7 +65,11 @@ export function WorkerForm({ id, onChanged }: { id?: string; onChanged: () => vo
   }, [id])
 
   if (!fields) {
-    return <section className="panel">{error ? <p className="error">{error}</p> : <p className="muted">Loading…</p>}</section>
+    return (
+      <Panel title="Worker settings">
+        {error ? <p className="text-danger">{error}</p> : <p className="text-muted">Loading…</p>}
+      </Panel>
+    )
   }
 
   const set = <K extends keyof Fields>(key: K, value: Fields[K]) => {
@@ -119,43 +124,45 @@ export function WorkerForm({ id, onChanged }: { id?: string; onChanged: () => vo
   }
 
   return (
-    <section className="panel">
-      <h2>{editing ? `${fields.name} settings` : 'New worker'}</h2>
-      <form className="form" onSubmit={submit}>
-        <label>
+    <Panel title={editing ? `${fields.name} settings` : 'New worker'}>
+      <form className="flex flex-col gap-5" onSubmit={submit}>
+        <label className="label">
           Name
-          <input value={fields.name} onChange={(e) => set('name', e.target.value)} required autoFocus={!editing} />
+          <input className="field" value={fields.name} onChange={(e) => set('name', e.target.value)} required autoFocus={!editing} />
         </label>
-        <label>
+        <label className="label">
           Description
           <input
+            className="field"
             value={fields.description}
             onChange={(e) => set('description', e.target.value)}
             placeholder="One line: what this worker is good at"
           />
         </label>
-        <label>
+        <label className="label">
           Role
           <textarea
+            className="field font-mono text-sm"
             value={fields.role}
             onChange={(e) => set('role', e.target.value)}
             rows={10}
             placeholder="Persona and standing instructions (saved as ROLE.md)"
           />
         </label>
-        <div className="row">
-          <label>
+        <div className="grid grid-cols-[2fr_1fr] gap-4">
+          <label className="label">
             Model
             <input
+            className="field"
               value={fields.model}
               onChange={(e) => set('model', e.target.value)}
               placeholder={editing ? undefined : 'Server default'}
               required={editing}
             />
           </label>
-          <label>
+          <label className="label">
             Thinking
-            <select value={fields.thinking} onChange={(e) => set('thinking', e.target.value as ThinkingLevel)}>
+            <select className="field" value={fields.thinking} onChange={(e) => set('thinking', e.target.value as ThinkingLevel)}>
               {THINKING.map((t) => (
                 <option key={t} value={t}>
                   {t}
@@ -164,34 +171,35 @@ export function WorkerForm({ id, onChanged }: { id?: string; onChanged: () => vo
             </select>
           </label>
         </div>
-        <label>
+        <label className="label">
           Disabled skills
           <input
+            className="field"
             value={fields.disabledSkills}
             onChange={(e) => set('disabledSkills', e.target.value)}
             placeholder="Comma-separated skill names (all others are enabled)"
           />
         </label>
 
-        {error && <p className="error">{error}</p>}
-        {saved && <p className="success">Saved. Changes apply to the worker's next session.</p>}
+        {error && <p className="text-danger">{error}</p>}
+        {saved && <p className="text-send">Saved. Changes apply to the worker's next session.</p>}
 
-        <div className="actions">
-          <button type="submit" disabled={saving}>
+        <div className="flex items-center gap-2.5">
+          <button type="submit" className="btn-primary" disabled={saving}>
             {editing ? 'Save' : 'Create worker'}
           </button>
           {editing && (
             <>
-              <a className="button secondary" href={`#/workers/${encodeURIComponent(id)}`}>
+              <a className="btn-secondary" href={`#/workers/${encodeURIComponent(id)}`}>
                 Back to chat
               </a>
-              <button type="button" className="danger" onClick={() => void remove()}>
+              <button type="button" className="btn-danger ml-auto" onClick={() => void remove()}>
                 Delete worker
               </button>
             </>
           )}
         </div>
       </form>
-    </section>
+    </Panel>
   )
 }
