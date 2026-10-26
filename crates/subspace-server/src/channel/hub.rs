@@ -169,7 +169,9 @@ impl ChannelHub {
 
     // --- Workspaces -------------------------------------------------------
 
+    /// All workspaces, oldest (the default) first. There is always at least one.
     pub async fn workspaces(&self) -> Result<Vec<Workspace>> {
+        self.store.ensure_default_workspace().await?;
         self.store.list_workspaces().await
     }
 

@@ -73,7 +73,6 @@ pub struct ChannelPost {
     pub id: String,
     pub channel_id: ChannelId,
     /// Position in the transcript (increasing; not contiguous per channel).
-    #[ts(type = "number")]
     pub seq: u64,
     pub author: Author,
     /// The author's display name when the post was written.

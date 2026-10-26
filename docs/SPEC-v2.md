@@ -638,7 +638,8 @@ enum ChannelEventKind {
     Post(ChannelPost),                            // persisted, stable id
     Notice(Notice),                               // run failure, hop limit, ...
     Worker { worker_id: WorkerId, event: WorkerEvent },  // live run activity
-    MembersChanged,
+    Changed,                                      // name/topic/members changed: refetch
+    Deleted,
 }
 ```
 

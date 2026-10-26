@@ -1,6 +1,7 @@
-//! HTTP API for the console: REST management under `/api`, plus the worker
-//! event stream (WebSocket). Errors are always JSON: `{"error": "..."}`.
+//! HTTP API for the console: REST management under `/api`, plus worker and
+//! channel event streams (WebSocket). Errors are always JSON: `{"error": "..."}`.
 
+mod channels;
 mod stream;
 mod workers;
 
@@ -16,7 +17,10 @@ use ts_rs::TS;
 
 use crate::manager::{ManagerError, WorkerManager};
 
-pub use stream::StreamMessage;
+pub use channels::{
+    AddMember, ChannelDetail, CreateChannel, CreatePost, UpdateChannel, WorkspaceDetail,
+};
+pub use stream::{ChannelStreamMessage, StreamMessage};
 pub use workers::{CreateWorker, PromptRequest, UpdateWorker, WorkerDetail};
 
 /// Shared state for all handlers.
@@ -27,7 +31,9 @@ pub fn router(manager: Arc<WorkerManager>) -> Router {
     Router::new()
         .route("/api/health", get(health))
         .route("/api/workers/{id}/stream", get(stream::stream))
+        .route("/api/channels/{id}/stream", get(stream::channel_stream))
         .merge(workers::routes())
+        .merge(channels::routes())
         .with_state(manager)
 }
 
