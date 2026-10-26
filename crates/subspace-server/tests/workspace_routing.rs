@@ -1,4 +1,4 @@
-//! Channels end to end at the manager level: mention routing, agent-to-agent
+//! Workspaces end to end at the manager level: mention routing, agent-to-agent
 //! replies, the hop limit, failures, and separate per-conversation sessions.
 
 mod common;
@@ -9,9 +9,9 @@ use std::sync::Arc;
 
 use common::{ScriptedProvider, is_router, last_user_text, prompt_and_wait, settle};
 use subspace::types::new_id;
-use subspace_server::channel::router::DEFAULT_ROUTER_MODEL;
-use subspace_server::channel::{Author, HOP_LIMIT, Routing};
 use subspace_server::store::SqliteStore;
+use subspace_server::workspace::router::DEFAULT_ROUTER_MODEL;
+use subspace_server::workspace::{Author, HOP_LIMIT, Routing};
 use subspace_server::{Homes, ManagerError, WorkerConfig, WorkerManager};
 
 struct Fixture {
@@ -30,7 +30,7 @@ async fn fixture(
     script: impl Fn(&subspace::provider::CompletionRequest) -> String + Send + Sync + 'static,
 ) -> Fixture {
     let provider = Arc::new(ScriptedProvider::new(script));
-    let data = std::env::temp_dir().join(format!("subspace_channels_test_{}", new_id()));
+    let data = std::env::temp_dir().join(format!("subspace_workspaces_test_{}", new_id()));
     fs::create_dir_all(&data).unwrap();
     let store = Arc::new(SqliteStore::connect("sqlite::memory:").await.unwrap());
     let manager =
@@ -51,24 +51,24 @@ impl Fixture {
             .unwrap()
     }
 
-    async fn channel(&self, name: &str, members: &[&String]) -> String {
-        let hub = self.manager.channels().unwrap();
-        let ws = &hub.workspaces().await.unwrap()[0];
+    async fn workspace(&self, name: &str, members: &[&String]) -> String {
+        let hub = self.manager.workspaces().unwrap();
+        let ws = &hub.teams().await.unwrap()[0];
         let members: Vec<String> = members.iter().map(|m| m.to_string()).collect();
-        hub.create_channel(&ws.id, name, "", &members)
+        hub.create_workspace(&ws.id, name, "", &members)
             .await
             .unwrap()
             .id
     }
 
-    async fn post(&self, channel: &str, text: &str) {
-        let hub = self.manager.channels().unwrap();
-        hub.post_operator(channel, text).await.unwrap();
+    async fn post(&self, workspace: &str, text: &str) {
+        let hub = self.manager.workspaces().unwrap();
+        hub.post_operator(workspace, text).await.unwrap();
     }
 
-    async fn transcript(&self, channel: &str) -> Vec<(String, String)> {
-        let hub = self.manager.channels().unwrap();
-        hub.posts(channel)
+    async fn transcript(&self, workspace: &str) -> Vec<(String, String)> {
+        let hub = self.manager.workspaces().unwrap();
+        hub.posts(workspace)
             .await
             .unwrap()
             .into_iter()
@@ -78,14 +78,14 @@ impl Fixture {
 }
 
 #[tokio::test]
-async fn new_workers_join_the_default_workspace() {
+async fn new_workers_join_the_default_team() {
     let f = fixture(|_| "ok".into()).await;
     let a = f.worker("Alpha").await;
-    let hub = f.manager.channels().unwrap();
-    let workspaces = hub.workspaces().await.unwrap();
-    assert_eq!(workspaces.len(), 1);
-    assert_eq!(workspaces[0].name, "General");
-    assert_eq!(hub.workspace_members(&workspaces[0].id).await.unwrap(), [a]);
+    let hub = f.manager.workspaces().unwrap();
+    let teams = hub.teams().await.unwrap();
+    assert_eq!(teams.len(), 1);
+    assert_eq!(teams[0].name, "General");
+    assert_eq!(hub.team_members(&teams[0].id).await.unwrap(), [a]);
 }
 
 #[tokio::test]
@@ -102,7 +102,7 @@ async fn a_mention_wakes_only_that_worker_and_its_reply_is_posted() {
     .await;
     let alpha = f.worker("Alpha").await;
     let beta = f.worker("Beta").await;
-    let ch = f.channel("launch", &[&alpha, &beta]).await;
+    let ch = f.workspace("launch", &[&alpha, &beta]).await;
 
     f.post(&ch, "@alpha status?").await;
     settle(&f.manager, &ch, 2).await;
@@ -116,10 +116,10 @@ async fn a_mention_wakes_only_that_worker_and_its_reply_is_posted() {
     );
     assert!(f.provider.requests_from("ROLE:Beta").is_empty());
 
-    // The turn shows the channel, the worker's identity, and the new post.
+    // The turn shows the workspace, the worker's identity, and the new post.
     let prompt = last_user_text(&f.provider.requests_from("ROLE:Alpha")[0]);
     assert!(
-        prompt.contains("<channel name=\"launch\" workspace=\"General\">"),
+        prompt.contains("<workspace name=\"launch\" team=\"General\">"),
         "{prompt}"
     );
     assert!(prompt.contains("You are @alpha."), "{prompt}");
@@ -131,7 +131,7 @@ async fn a_mention_wakes_only_that_worker_and_its_reply_is_posted() {
     // An unaddressed note goes to the router, which can decide nobody answers.
     f.post(&ch, "just a note").await;
     settle(&f.manager, &ch, 3).await;
-    let posts = f.manager.channels().unwrap().posts(&ch).await.unwrap();
+    let posts = f.manager.workspaces().unwrap().posts(&ch).await.unwrap();
     assert_eq!(
         posts[2].routing,
         Routing::Nobody {
@@ -154,12 +154,12 @@ async fn workers_hand_off_to_each_other_and_catch_up_on_what_they_missed() {
     .await;
     let researcher = f.worker("Researcher").await;
     let writer = f.worker("Writer").await;
-    let ch = f.channel("launch", &[&researcher, &writer]).await;
+    let ch = f.workspace("launch", &[&researcher, &writer]).await;
 
     f.post(&ch, "@researcher what changed in v2?").await;
     settle(&f.manager, &ch, 3).await;
 
-    let posts = f.manager.channels().unwrap().posts(&ch).await.unwrap();
+    let posts = f.manager.workspaces().unwrap().posts(&ch).await.unwrap();
     assert_eq!(posts.len(), 3);
     assert_eq!(posts[1].author, Author::Worker(researcher.clone()));
     assert_eq!(posts[1].mentions, std::slice::from_ref(&writer));
@@ -195,12 +195,12 @@ async fn the_hop_limit_stops_runaway_agent_conversations() {
     .await;
     let ping = f.worker("Ping").await;
     let pong = f.worker("Pong").await;
-    let ch = f.channel("loop", &[&ping, &pong]).await;
+    let ch = f.workspace("loop", &[&ping, &pong]).await;
 
     f.post(&ch, "@ping start").await;
     settle(&f.manager, &ch, 1 + HOP_LIMIT as usize).await;
 
-    let hub = f.manager.channels().unwrap();
+    let hub = f.manager.workspaces().unwrap();
     let posts = hub.posts(&ch).await.unwrap();
     assert_eq!(
         posts.len(),
@@ -223,7 +223,7 @@ async fn the_hop_limit_stops_runaway_agent_conversations() {
 }
 
 #[tokio::test]
-async fn channel_sessions_are_separate_from_the_dm() {
+async fn workspace_sessions_are_separate_from_the_dm() {
     let f = fixture(|r| {
         format!(
             "reply to: {}",
@@ -232,20 +232,20 @@ async fn channel_sessions_are_separate_from_the_dm() {
     })
     .await;
     let alpha = f.worker("Alpha").await;
-    let ch = f.channel("launch", &[&alpha]).await;
+    let ch = f.workspace("launch", &[&alpha]).await;
 
     prompt_and_wait(&f.manager, &alpha, "dm one").await;
-    f.post(&ch, "@alpha in channel").await;
+    f.post(&ch, "@alpha in workspace").await;
     settle(&f.manager, &ch, 2).await;
     prompt_and_wait(&f.manager, &alpha, "dm two").await;
 
     let requests = f.provider.requests();
     let texts =
         |i: usize| -> Vec<String> { requests[i].messages.iter().map(|m| m.text()).collect() };
-    // The channel turn starts a fresh session...
+    // The workspace turn starts a fresh session...
     assert_eq!(requests[1].messages.len(), 1);
-    assert!(texts(1)[0].starts_with("<channel"));
-    // ...and the DM continues without any channel content.
+    assert!(texts(1)[0].starts_with("<workspace"));
+    // ...and the DM continues without any workspace content.
     assert_eq!(texts(2), ["dm one", "reply to: dm one", "dm two"]);
     assert!(
         f.manager
@@ -254,7 +254,7 @@ async fn channel_sessions_are_separate_from_the_dm() {
             .unwrap()
             .messages
             .iter()
-            .all(|m| !m.text().contains("channel"))
+            .all(|m| !m.text().contains("workspace"))
     );
 }
 
@@ -262,7 +262,7 @@ async fn channel_sessions_are_separate_from_the_dm() {
 async fn a_failed_turn_leaves_a_notice_instead_of_a_post() {
     let f = fixture(|_| String::new()).await;
     let alpha = f.worker("Alpha").await;
-    let ch = f.channel("launch", &[&alpha]).await;
+    let ch = f.workspace("launch", &[&alpha]).await;
 
     f.post(&ch, "@alpha hello?").await;
     settle(&f.manager, &ch, 1).await;
@@ -272,10 +272,10 @@ async fn a_failed_turn_leaves_a_notice_instead_of_a_post() {
         "empty replies aren't posted"
     );
 
-    // A worker that's gone can't be woken; the channel says so.
+    // A worker that's gone can't be woken; the workspace says so.
     f.manager.shutdown(&alpha).await.unwrap();
     f.post(&ch, "@alpha anyone?").await;
-    let notices = f.manager.channels().unwrap().notices(&ch).await.unwrap();
+    let notices = f.manager.workspaces().unwrap().notices(&ch).await.unwrap();
     assert_eq!(notices.len(), 1);
     assert!(
         notices[0].text.contains("isn't running"),
@@ -287,44 +287,52 @@ async fn a_failed_turn_leaves_a_notice_instead_of_a_post() {
 #[tokio::test]
 async fn membership_rules() {
     let f = fixture(|_| "ok".into()).await;
-    let hub = f.manager.channels().unwrap();
+    let hub = f.manager.workspaces().unwrap();
     let alpha = f.worker("Alpha").await;
     let twin = f.worker("alpha").await;
-    let ch = f.channel("launch", &[&alpha]).await;
-    let ws = hub.workspaces().await.unwrap()[0].id.clone();
+    let ch = f.workspace("launch", &[&alpha]).await;
+    let ws = hub.teams().await.unwrap()[0].id.clone();
 
-    // Handles must be unique per channel.
+    // Handles must be unique per workspace.
     let err = hub.add_member(&ch, &twin).await.unwrap_err();
     assert!(
         matches!(err.downcast_ref(), Some(ManagerError::Conflict(_))),
         "{err}"
     );
 
-    // Members must belong to the channel's workspace.
+    // Members must belong to the workspace's team.
     let beta = f.worker("Beta").await;
-    hub.remove_workspace_member(&ws, &beta).await.unwrap();
+    hub.remove_team_member(&ws, &beta).await.unwrap();
     let err = hub.add_member(&ch, &beta).await.unwrap_err();
     assert!(
         matches!(err.downcast_ref(), Some(ManagerError::Invalid(_))),
         "{err}"
     );
 
-    // Leaving the workspace leaves its channels.
-    hub.remove_workspace_member(&ws, &alpha).await.unwrap();
+    // Leaving the team leaves its workspaces.
+    hub.remove_team_member(&ws, &alpha).await.unwrap();
     assert!(hub.members(&ch).await.unwrap().is_empty());
 
-    // Channel names are normalized and unique.
+    // Workspace names are normalized and unique.
     let id = hub
-        .create_channel(&ws, "Launch Plan!", "", &[])
+        .create_workspace(&ws, " Launch  Plan! ", "", &[])
         .await
         .unwrap();
-    assert_eq!(id.name, "launch-plan");
+    assert_eq!(id.name, "Launch Plan!");
     let err = hub
-        .create_channel(&ws, "launch plan", "", &[])
+        .create_workspace(&ws, "Launch Plan!", "", &[])
         .await
         .unwrap_err();
     assert!(
         matches!(err.downcast_ref(), Some(ManagerError::Conflict(_))),
+        "{err}"
+    );
+    let err = hub
+        .create_workspace(&ws, &"x".repeat(81), "", &[])
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(err.downcast_ref(), Some(ManagerError::Invalid(_))),
         "{err}"
     );
     let err = hub.post_operator(&ch, "   ").await.unwrap_err();
@@ -335,9 +343,9 @@ async fn membership_rules() {
 }
 
 #[tokio::test]
-async fn channels_need_persistence() {
+async fn workspaces_need_persistence() {
     let manager = WorkerManager::new(Arc::new(ScriptedProvider::new(|_| String::new())));
-    let err = manager.channels().err().unwrap();
+    let err = manager.workspaces().err().unwrap();
     assert!(matches!(
         err.downcast_ref(),
         Some(ManagerError::Unsupported(_))
@@ -362,11 +370,11 @@ async fn unaddressed_posts_go_to_the_best_fit_worker() {
     .await;
     let researcher = f.worker("Researcher").await;
     let writer = f.worker("Writer").await;
-    let hub = f.manager.channels().unwrap();
+    let hub = f.manager.workspaces().unwrap();
     let mut cfg = f.manager.get(&writer).unwrap();
     cfg.description = "Drafts announcements".into();
     f.manager.update(cfg).await.unwrap();
-    let ch = f.channel("launch", &[&researcher, &writer]).await;
+    let ch = f.workspace("launch", &[&researcher, &writer]).await;
 
     f.post(&ch, "What changed in v2?").await;
     settle(&f.manager, &ch, 2).await;
@@ -422,11 +430,11 @@ async fn unaddressed_posts_go_to_the_best_fit_worker() {
 async fn a_lone_worker_answers_without_a_routing_call() {
     let f = fixture(|_| "on it".into()).await;
     let alpha = f.worker("Alpha").await;
-    let ch = f.channel("solo", &[&alpha]).await;
+    let ch = f.workspace("solo", &[&alpha]).await;
 
     f.post(&ch, "anything new?").await;
     settle(&f.manager, &ch, 2).await;
-    let posts = f.manager.channels().unwrap().posts(&ch).await.unwrap();
+    let posts = f.manager.workspaces().unwrap().posts(&ch).await.unwrap();
     assert!(matches!(&posts[0].routing, Routing::Chosen { worker_id, .. } if worker_id == &alpha));
     assert_eq!(f.provider.requests().len(), 1);
     assert!(!is_router(&f.provider.requests()[0]));
@@ -444,11 +452,11 @@ async fn an_unusable_routing_answer_wakes_nobody_and_says_so() {
     .await;
     let alpha = f.worker("Alpha").await;
     let beta = f.worker("Beta").await;
-    let ch = f.channel("launch", &[&alpha, &beta]).await;
+    let ch = f.workspace("launch", &[&alpha, &beta]).await;
 
     f.post(&ch, "hello?").await;
     settle(&f.manager, &ch, 1).await;
-    let hub = f.manager.channels().unwrap();
+    let hub = f.manager.workspaces().unwrap();
     let posts = hub.posts(&ch).await.unwrap();
     assert_eq!(posts.len(), 1);
     assert!(matches!(&posts[0].routing, Routing::Failed { error } if error.contains("@ghost")));
@@ -463,10 +471,10 @@ async fn an_unusable_routing_answer_wakes_nobody_and_says_so() {
 
 #[test]
 fn router_answers_are_parsed_leniently_but_checked() {
-    use subspace_server::channel::ChannelMember;
-    use subspace_server::channel::router::{Candidate, parse_answer};
+    use subspace_server::workspace::WorkspaceMember;
+    use subspace_server::workspace::router::{Candidate, parse_answer};
     let candidates = vec![Candidate {
-        member: ChannelMember {
+        member: WorkspaceMember {
             worker_id: "w1".into(),
             name: "Writer".into(),
             handle: "writer".into(),

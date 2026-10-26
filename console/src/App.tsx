@@ -1,20 +1,20 @@
-import { ChannelSettings, NewChannelForm } from './components/ChannelForm'
-import { ChannelView } from './components/ChannelView'
+import { WorkspaceSettings, NewWorkspaceForm } from './components/WorkspaceForm'
+import { WorkspaceView } from './components/WorkspaceView'
 import { Chat } from './components/Chat'
 import { Sidebar } from './components/Sidebar'
 import { WorkerForm } from './components/WorkerForm'
 import { EmptyState, Panel } from './components/ui'
 import { href, useRoute } from './route'
 import { useWorkers } from './useWorkers'
-import { useWorkspace } from './useWorkspace'
+import { useTeam } from './useTeam'
 
 export default function App() {
   const route = useRoute()
   const { workers, error, refresh: refreshWorkers } = useWorkers()
-  const { workspace, refresh: refreshWorkspace } = useWorkspace()
+  const { team, refresh: refreshTeam } = useTeam()
   const onChanged = () => {
     refreshWorkers()
-    refreshWorkspace()
+    refreshTeam()
   }
 
   let main
@@ -34,18 +34,18 @@ export default function App() {
       )
       break
     }
-    case 'new-channel':
-      main = <NewChannelForm workspace={workspace} workers={workers} onChanged={onChanged} />
+    case 'new-workspace':
+      main = <NewWorkspaceForm team={team} workers={workers} onChanged={onChanged} />
       break
-    case 'channel':
-      main = <ChannelView key={route.id} id={route.id} />
+    case 'workspace':
+      main = <WorkspaceView key={route.id} id={route.id} />
       break
-    case 'channel-settings':
+    case 'workspace-settings':
       main = (
-        <ChannelSettings
+        <WorkspaceSettings
           key={route.id}
           id={route.id}
-          workspace={workspace}
+          team={team}
           workers={workers}
           onChanged={onChanged}
         />
@@ -53,10 +53,10 @@ export default function App() {
       break
     case 'home':
       main = (
-        <Panel title={`Welcome to ${workspace?.workspace.name ?? 'Subspace'}`}>
+        <Panel title={`Welcome to ${team?.team.name ?? 'Subspace'}`}>
           <p className="text-muted">
-            Open a channel to work with several workers together, or a direct message to talk to
-            one. <a href={href({ page: 'new-channel' })}>Create a channel</a> or{' '}
+            Open a workspace to work with several workers together, or a direct message to talk to
+            one. <a href={href({ page: 'new-workspace' })}>Create a workspace</a> or{' '}
             <a href={href({ page: 'new' })}>a worker</a>.
           </p>
         </Panel>
@@ -66,7 +66,7 @@ export default function App() {
 
   return (
     <div className="grid h-full grid-cols-[260px_minmax(0,1fr)]">
-      <Sidebar workspace={workspace} workers={workers} error={error} route={route} />
+      <Sidebar team={team} workers={workers} error={error} route={route} />
       <main className="flex min-h-0 flex-col">{main}</main>
     </div>
   )

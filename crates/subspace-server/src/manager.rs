@@ -17,14 +17,14 @@ use tokio::task::JoinHandle;
 use ts_rs::TS;
 
 use crate::WorkerId;
-use crate::channel::hub::ChannelHub;
-use crate::channel::router::{DEFAULT_ROUTER_MODEL, Router};
 use crate::event::{EventLog, Notice, Replay, ServerEvent};
 use crate::home::Homes;
 use crate::home_tools::{HomeScope, home_tools};
 use crate::skills::{self, Skill, SkillSource};
 use crate::store::SqliteStore;
 use crate::worker::{Runtime, Stimulus, WorkerConfig, WorkerStatus, run_worker};
+use crate::workspace::hub::WorkspaceHub;
+use crate::workspace::router::{DEFAULT_ROUTER_MODEL, Router};
 
 const EVENT_BUS_CAPACITY: usize = 1024;
 const MAILBOX_CAPACITY: usize = 64;
@@ -37,8 +37,8 @@ pub enum ManagerError {
     AlreadyExists(WorkerId),
     /// The worker is mid-run; retry once it is idle.
     Busy(WorkerId),
+    NoSuchTeam(String),
     NoSuchWorkspace(String),
-    NoSuchChannel(String),
     /// The request clashes with existing state (e.g. a taken name).
     Conflict(String),
     /// The request is malformed or not allowed (e.g. an empty post).
@@ -53,8 +53,8 @@ impl fmt::Display for ManagerError {
             Self::NotFound(id) => write!(f, "no such worker: {id}"),
             Self::AlreadyExists(id) => write!(f, "worker '{id}' already exists"),
             Self::Busy(id) => write!(f, "worker '{id}' is busy; try again when it is idle"),
+            Self::NoSuchTeam(id) => write!(f, "no such team: {id}"),
             Self::NoSuchWorkspace(id) => write!(f, "no such workspace: {id}"),
-            Self::NoSuchChannel(id) => write!(f, "no such channel: {id}"),
             Self::Conflict(msg) | Self::Invalid(msg) | Self::Unsupported(msg) => f.write_str(msg),
         }
     }
@@ -107,8 +107,8 @@ pub struct WorkerManager {
     events: broadcast::Sender<ServerEvent>,
     workers: Mutex<HashMap<WorkerId, WorkerHandle>>,
     persistence: Option<Persistence>,
-    /// Workspaces and channels; needs persistence.
-    hub: Option<Arc<ChannelHub>>,
+    /// Teams and workspaces; needs persistence.
+    hub: Option<Arc<WorkspaceHub>>,
     /// Random per-process id; event `seq`s are only comparable within one.
     epoch: String,
 }
@@ -133,7 +133,7 @@ impl WorkerManager {
         let (events, _) = broadcast::channel(EVENT_BUS_CAPACITY);
         let hub = persistence.as_ref().map(|p| {
             let router = Router::new(provider.clone(), DEFAULT_ROUTER_MODEL);
-            Arc::new(ChannelHub::new(p.store.clone(), router))
+            Arc::new(WorkspaceHub::new(p.store.clone(), router))
         });
         Self {
             provider,
@@ -145,21 +145,21 @@ impl WorkerManager {
         }
     }
 
-    /// Use `model` to route channel posts that mention nobody. Call before
+    /// Use `model` to route workspace posts that mention nobody. Call before
     /// starting workers.
     pub fn with_router_model(mut self, model: impl Into<String>) -> Self {
         let model = model.into();
         if let Some(p) = &self.persistence {
             let router = Router::new(self.provider.clone(), model);
-            self.hub = Some(Arc::new(ChannelHub::new(p.store.clone(), router)));
+            self.hub = Some(Arc::new(WorkspaceHub::new(p.store.clone(), router)));
         }
         self
     }
 
-    /// Workspaces and channels. Only available with persistence.
-    pub fn channels(&self) -> Result<&Arc<ChannelHub>> {
+    /// Teams and workspaces. Only available with persistence.
+    pub fn workspaces(&self) -> Result<&Arc<WorkspaceHub>> {
         self.hub.as_ref().ok_or_else(|| {
-            ManagerError::Unsupported("channels need a persistent server".into()).into()
+            ManagerError::Unsupported("workspaces need a persistent server".into()).into()
         })
     }
 
@@ -197,7 +197,7 @@ impl WorkerManager {
         };
 
         migrate_legacy_workers(p).await?;
-        let default_workspace = p.store.ensure_default_workspace().await?;
+        let default_team = p.store.ensure_default_team().await?;
 
         let listing = p.homes.list()?;
         for (id, err) in &listing.invalid {
@@ -228,10 +228,8 @@ impl WorkerManager {
                 continue;
             }
             p.store.upsert_index(&cfg, &p.homes.path(&cfg.id)?).await?;
-            if p.store.worker_workspaces(&cfg.id).await?.is_empty() {
-                p.store
-                    .add_workspace_member(&default_workspace.id, &cfg.id)
-                    .await?;
+            if p.store.worker_teams(&cfg.id).await?.is_empty() {
+                p.store.add_team_member(&default_team.id, &cfg.id).await?;
             }
             let history = p.store.load_history(&cfg.id).await?;
             self.start(cfg, history, None).await?;
@@ -255,10 +253,8 @@ impl WorkerManager {
             let home = p.homes.create(&config)?;
             let indexed = async {
                 p.store.upsert_index(&config, &home).await?;
-                let workspace = p.store.ensure_default_workspace().await?;
-                p.store
-                    .add_workspace_member(&workspace.id, &config.id)
-                    .await
+                let team = p.store.ensure_default_team().await?;
+                p.store.add_team_member(&team.id, &config.id).await
             };
             if let Err(e) = indexed.await {
                 let _ = p.homes.remove(&config.id);
@@ -506,8 +502,8 @@ impl WorkerManager {
             return Err(ManagerError::NotFound(id.to_string()).into());
         }
 
-        let channels = match &self.hub {
-            Some(hub) => hub.channels_of(id).await?,
+        let workspaces = match &self.hub {
+            Some(hub) => hub.workspaces_of(id).await?,
             None => Vec::new(),
         };
         if running {
@@ -518,8 +514,8 @@ impl WorkerManager {
             p.homes.remove(id)?;
         }
         if let Some(hub) = &self.hub {
-            for channel_id in channels {
-                hub.changed(&channel_id);
+            for workspace_id in workspaces {
+                hub.changed(&workspace_id);
             }
         }
         Ok(())

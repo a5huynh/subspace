@@ -9,7 +9,7 @@ use serde::Deserialize;
 use subspace::provider::{CompletionRequest, Provider};
 use subspace::types::{Message, ThinkingLevel};
 
-use super::{Author, Channel, ChannelMember, ChannelPost, OPERATOR_HANDLE, Routing};
+use super::{Author, OPERATOR_HANDLE, Routing, Workspace, WorkspaceMember, WorkspacePost};
 
 /// The routing model when the server doesn't set one.
 pub const DEFAULT_ROUTER_MODEL: &str = "claude-haiku-5-5";
@@ -20,17 +20,17 @@ pub const CONTEXT_POSTS: usize = 10;
 
 const MAX_TOKENS: u32 = 300;
 
-const SYSTEM_PROMPT: &str = "You route messages in a team chat channel. Pick the single member best \
-suited to respond to the new message, based on their descriptions and roles. If the message \
+const SYSTEM_PROMPT: &str = "You route messages in a shared workspace where a person and several AI workers \
+collaborate on a piece of work. Pick the single member best suited to respond to the new message, based on their descriptions and roles. If the message \
 follows up on the recent conversation, prefer the member already handling it. If the message \
 needs no response (thanks, acknowledgements, FYIs, notes), pick nobody.\n\n\
 Reply with only a JSON object: {\"handle\": \"<member handle without @>\", \"reason\": \"<a few \
 words>\"} or {\"handle\": null, \"reason\": \"<a few words>\"}.";
 
-/// A member the router may pick: a running worker in the channel.
+/// A member the router may pick: a running worker in the workspace.
 #[derive(Debug, Clone)]
 pub struct Candidate {
-    pub member: ChannelMember,
+    pub member: WorkspaceMember,
     pub role: String,
 }
 
@@ -62,17 +62,17 @@ impl Router {
     /// call. Errors (provider failure, unusable answer) mean nobody is woken.
     pub async fn choose(
         &self,
-        channel: &Channel,
+        workspace: &Workspace,
         candidates: &[Candidate],
-        recent: &[ChannelPost],
-        post: &ChannelPost,
+        recent: &[WorkspacePost],
+        post: &WorkspacePost,
     ) -> Result<Routing> {
         match candidates {
             [] => return Ok(Routing::Direct),
             [only] => {
                 return Ok(Routing::Chosen {
                     worker_id: only.member.worker_id.clone(),
-                    reason: "the only worker in this channel".into(),
+                    reason: "the only worker in this workspace".into(),
                 });
             }
             _ => {}
@@ -81,7 +81,7 @@ impl Router {
         let request = CompletionRequest {
             model: self.model.clone(),
             messages: vec![Message::user(render_request(
-                channel, candidates, recent, post,
+                workspace, candidates, recent, post,
             ))],
             system_prompt: Some(SYSTEM_PROMPT.to_string()),
             tools: Vec::new(),
@@ -89,21 +89,21 @@ impl Router {
             thinking: ThinkingLevel::Off,
         };
         let mut stream = self.provider.complete(request).await?;
-        // Drain events so the provider task never blocks on a full channel.
+        // Drain events so the provider task never blocks on a full workspace.
         while stream.events.recv().await.is_some() {}
         let reply = stream.handle.await.context("router task panicked")??;
         parse_answer(&reply.text(), candidates)
     }
 }
 
-/// The router's user message: channel, members, recent posts, and the post.
+/// The router's user message: workspace, members, recent posts, and the post.
 pub fn render_request(
-    channel: &Channel,
+    workspace: &Workspace,
     candidates: &[Candidate],
-    recent: &[ChannelPost],
-    post: &ChannelPost,
+    recent: &[WorkspacePost],
+    post: &WorkspacePost,
 ) -> String {
-    let handle_of = |p: &ChannelPost| match &p.author {
+    let handle_of = |p: &WorkspacePost| match &p.author {
         Author::Operator => OPERATOR_HANDLE.to_string(),
         Author::Worker(id) => candidates
             .iter()
@@ -114,9 +114,9 @@ pub fn render_request(
             ),
     };
 
-    let mut out = format!("Channel: #{}", channel.name);
-    if !channel.topic.is_empty() {
-        out.push_str(&format!(" (topic: {})", channel.topic));
+    let mut out = format!("Workspace: {}", workspace.name);
+    if !workspace.topic.is_empty() {
+        out.push_str(&format!(" (topic: {})", workspace.topic));
     }
     out.push_str("\n\nMembers:\n");
     for c in candidates {
@@ -164,7 +164,7 @@ pub fn parse_answer(reply: &str, candidates: &[Candidate]) -> Result<Routing> {
             worker_id: c.member.worker_id.clone(),
             reason,
         })
-        .ok_or_else(|| anyhow!("the router picked @{handle}, who isn't in this channel"))
+        .ok_or_else(|| anyhow!("the router picked @{handle}, who isn't in this workspace"))
 }
 
 fn excerpt(text: &str, max_chars: usize) -> String {

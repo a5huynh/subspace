@@ -61,7 +61,7 @@ export function applyEvent(state: ChatState, event: ServerEvent): ChatState {
   return applyWorkerEvent(state, event.inner)
 }
 
-/** Apply one worker event (also used for a worker's activity in a channel). */
+/** Apply one worker event (also used for a worker's activity in a workspace). */
 export function applyWorkerEvent(state: ChatState, inner: WorkerEvent): ChatState {
   switch (inner.type) {
     case 'user_message':

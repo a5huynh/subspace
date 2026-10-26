@@ -1,9 +1,9 @@
-//! The channel hub: workspace/channel management, posting, mention routing
-//! (with the hop limit), and per-channel event logs.
+//! The workspace hub: team/workspace management, posting, mention routing
+//! (with the hop limit), and per-workspace event logs.
 //!
-//! Workers are woken with [`Stimulus::ChannelTurn`]; the worker loop calls
-//! back into the hub to build its turn ([`ChannelHub::prepare_turn`]), stream
-//! its activity, and post its reply ([`ChannelHub::post_reply`]). The hub
+//! Workers are woken with [`Stimulus::WorkspaceTurn`]; the worker loop calls
+//! back into the hub to build its turn ([`WorkspaceHub::prepare_turn`]), stream
+//! its activity, and post its reply ([`WorkspaceHub::post_reply`]). The hub
 //! holds only *weak* mailbox senders, so it never keeps a worker alive.
 
 use std::collections::HashMap;
@@ -16,18 +16,19 @@ use tokio::sync::{broadcast, mpsc};
 
 use super::router::{CONTEXT_POSTS, Candidate, Router};
 use super::{
-    Author, BACKLOG_LIMIT, Channel, ChannelMember, ChannelPost, Conversation, HOP_LIMIT,
-    OPERATOR_HANDLE, Routing, Workspace, handle_for, parse_mentions, render_turn,
+    Author, BACKLOG_LIMIT, Conversation, HOP_LIMIT, OPERATOR_HANDLE, Routing, Team, Workspace,
+    WorkspaceMember, WorkspacePost, handle_for, parse_mentions, render_turn,
 };
 use crate::WorkerId;
 use crate::event::{
-    ChannelEvent, ChannelEventKind, ChannelLog, Notice, NoticeLevel, Replay, WorkerEvent,
+    Notice, NoticeLevel, Replay, WorkerEvent, WorkspaceEvent, WorkspaceEventKind, WorkspaceLog,
 };
 use crate::manager::ManagerError;
 use crate::store::SqliteStore;
 use crate::worker::{Stimulus, WorkerConfig};
 
-const CHANNEL_BUS_CAPACITY: usize = 1024;
+const WORKSPACE_BUS_CAPACITY: usize = 1024;
+const MAX_WORKSPACE_NAME: usize = 80;
 
 /// What a post's replies inherit: the chain it belongs to and its depth.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -36,10 +37,10 @@ pub struct Trigger {
     pub hops: u32,
 }
 
-/// A prepared channel turn: the prompt to run in the worker's channel session.
+/// A prepared workspace turn: the prompt to run in the worker's workspace session.
 #[derive(Debug, Clone)]
 pub struct Turn {
-    pub channel: Channel,
+    pub workspace: Workspace,
     pub prompt: String,
 }
 
@@ -50,17 +51,17 @@ struct Registered {
     tx: mpsc::WeakSender<Stimulus>,
 }
 
-pub struct ChannelHub {
+pub struct WorkspaceHub {
     store: Arc<SqliteStore>,
-    bus: broadcast::Sender<ChannelEvent>,
-    logs: Mutex<HashMap<String, Arc<ChannelLog>>>,
+    bus: broadcast::Sender<WorkspaceEvent>,
+    logs: Mutex<HashMap<String, Arc<WorkspaceLog>>>,
     workers: Mutex<HashMap<WorkerId, Registered>>,
     router: Router,
 }
 
-impl ChannelHub {
+impl WorkspaceHub {
     pub fn new(store: Arc<SqliteStore>, router: Router) -> Self {
-        let (bus, _) = broadcast::channel(CHANNEL_BUS_CAPACITY);
+        let (bus, _) = broadcast::channel(WORKSPACE_BUS_CAPACITY);
         Self {
             store,
             bus,
@@ -75,7 +76,7 @@ impl ChannelHub {
         self.router.model()
     }
 
-    /// Make a running worker reachable from channels (call again after a
+    /// Make a running worker reachable from workspaces (call again after a
     /// restart or rename).
     pub(crate) fn register(&self, config: &WorkerConfig, tx: &mpsc::Sender<Stimulus>) {
         self.workers.lock().unwrap().insert(
@@ -99,73 +100,73 @@ impl ChannelHub {
 
     // --- Event logs -------------------------------------------------------
 
-    /// A channel's event log, created on first use.
-    pub fn log(&self, channel_id: &str) -> Arc<ChannelLog> {
+    /// A workspace's event log, created on first use.
+    pub fn log(&self, workspace_id: &str) -> Arc<WorkspaceLog> {
         self.logs
             .lock()
             .unwrap()
-            .entry(channel_id.to_string())
-            .or_insert_with(|| Arc::new(ChannelLog::new(channel_id, self.bus.clone())))
+            .entry(workspace_id.to_string())
+            .or_insert_with(|| Arc::new(WorkspaceLog::new(workspace_id, self.bus.clone())))
             .clone()
     }
 
-    /// Subscribe to one channel's events after `since` (see
+    /// Subscribe to one workspace's events after `since` (see
     /// [`crate::event::EventLog::subscribe`]). The receiver carries every
-    /// channel's events; filter by `channel_id`.
+    /// workspace's events; filter by `workspace_id`.
     pub fn subscribe(
         &self,
-        channel_id: &str,
+        workspace_id: &str,
         since: u64,
-    ) -> (Replay<ChannelEvent>, broadcast::Receiver<ChannelEvent>) {
-        self.log(channel_id).subscribe(since)
+    ) -> (Replay<WorkspaceEvent>, broadcast::Receiver<WorkspaceEvent>) {
+        self.log(workspace_id).subscribe(since)
     }
 
-    fn emit(&self, channel_id: &str, kind: ChannelEventKind) {
-        self.log(channel_id).emit(kind);
+    fn emit(&self, workspace_id: &str, kind: WorkspaceEventKind) {
+        self.log(workspace_id).emit(kind);
     }
 
-    /// Stream a worker's live activity in a channel.
-    pub(crate) fn emit_worker(&self, channel_id: &str, worker_id: &str, event: WorkerEvent) {
+    /// Stream a worker's live activity in a workspace.
+    pub(crate) fn emit_worker(&self, workspace_id: &str, worker_id: &str, event: WorkerEvent) {
         self.emit(
-            channel_id,
-            ChannelEventKind::Worker {
+            workspace_id,
+            WorkspaceEventKind::Worker {
                 worker_id: worker_id.to_string(),
                 event,
             },
         );
     }
 
-    /// Persist and publish a channel notice. `worker_id` is the worker it
-    /// concerns, or empty for channel-wide notices.
+    /// Persist and publish a workspace notice. `worker_id` is the worker it
+    /// concerns, or empty for workspace-wide notices.
     pub(crate) async fn notice(
         &self,
-        channel_id: &str,
+        workspace_id: &str,
         worker_id: &str,
         level: NoticeLevel,
         text: impl Into<String>,
     ) {
         let notice = Notice::new(level, text);
-        let conversation = Conversation::Channel(channel_id.to_string());
+        let conversation = Conversation::Workspace(workspace_id.to_string());
         if let Err(e) = self
             .store
             .append_conversation_notice(worker_id, &conversation, &notice)
             .await
         {
-            tracing::warn!("failed to persist channel notice: {e:#}");
+            tracing::warn!("failed to persist workspace notice: {e:#}");
         }
-        self.emit(channel_id, ChannelEventKind::Notice(notice));
+        self.emit(workspace_id, WorkspaceEventKind::Notice(notice));
     }
 
-    /// A failed turn: tell the channel which worker failed and why.
+    /// A failed turn: tell the workspace which worker failed and why.
     pub(crate) async fn turn_failed(
         &self,
-        channel_id: &str,
+        workspace_id: &str,
         worker_id: &str,
         level: NoticeLevel,
         text: &str,
     ) {
         let name = self.name_of(worker_id);
-        self.notice(channel_id, worker_id, level, format!("{name}: {text}"))
+        self.notice(workspace_id, worker_id, level, format!("{name}: {text}"))
             .await;
     }
 
@@ -177,12 +178,83 @@ impl ChannelHub {
             .map_or_else(|| worker_id.to_string(), |w| w.name.clone())
     }
 
-    // --- Workspaces -------------------------------------------------------
+    // --- Teams -------------------------------------------------------
 
-    /// All workspaces, oldest (the default) first. There is always at least one.
-    pub async fn workspaces(&self) -> Result<Vec<Workspace>> {
-        self.store.ensure_default_workspace().await?;
-        self.store.list_workspaces().await
+    /// All teams, oldest (the default) first. There is always at least one.
+    pub async fn teams(&self) -> Result<Vec<Team>> {
+        self.store.ensure_default_team().await?;
+        self.store.list_teams().await
+    }
+
+    pub async fn team(&self, id: &str) -> Result<Team> {
+        self.store
+            .get_team(id)
+            .await?
+            .ok_or_else(|| ManagerError::NoSuchTeam(id.to_string()).into())
+    }
+
+    pub async fn team_members(&self, id: &str) -> Result<Vec<WorkerId>> {
+        self.team(id).await?;
+        self.store.team_members(id).await
+    }
+
+    pub async fn add_team_member(&self, id: &str, worker_id: &str) -> Result<()> {
+        self.team(id).await?;
+        if !self.is_registered(worker_id) {
+            return Err(ManagerError::NotFound(worker_id.to_string()).into());
+        }
+        self.store.add_team_member(id, worker_id).await
+    }
+
+    /// Remove a worker from a team and all of its workspaces.
+    pub async fn remove_team_member(&self, id: &str, worker_id: &str) -> Result<()> {
+        self.team(id).await?;
+        let mut affected = Vec::new();
+        for workspace in self.store.list_workspaces(id).await? {
+            if self
+                .store
+                .last_seen(&workspace.id, worker_id)
+                .await?
+                .is_some()
+            {
+                affected.push(workspace.id);
+            }
+        }
+        self.store.remove_team_member(id, worker_id).await?;
+        for workspace_id in affected {
+            self.emit(&workspace_id, WorkspaceEventKind::Changed);
+        }
+        Ok(())
+    }
+
+    /// Workspaces a worker is about to lose (before it is deleted), so they can
+    /// be told their membership changed.
+    pub(crate) async fn workspaces_of(&self, worker_id: &str) -> Result<Vec<String>> {
+        let mut out = Vec::new();
+        for ws in self.store.worker_teams(worker_id).await? {
+            for workspace in self.store.list_workspaces(&ws).await? {
+                if self
+                    .store
+                    .last_seen(&workspace.id, worker_id)
+                    .await?
+                    .is_some()
+                {
+                    out.push(workspace.id);
+                }
+            }
+        }
+        Ok(out)
+    }
+
+    pub(crate) fn changed(&self, workspace_id: &str) {
+        self.emit(workspace_id, WorkspaceEventKind::Changed);
+    }
+
+    // --- Workspaces ---------------------------------------------------------
+
+    pub async fn workspaces(&self, team_id: &str) -> Result<Vec<Workspace>> {
+        self.team(team_id).await?;
+        self.store.list_workspaces(team_id).await
     }
 
     pub async fn workspace(&self, id: &str) -> Result<Workspace> {
@@ -192,138 +264,71 @@ impl ChannelHub {
             .ok_or_else(|| ManagerError::NoSuchWorkspace(id.to_string()).into())
     }
 
-    pub async fn workspace_members(&self, id: &str) -> Result<Vec<WorkerId>> {
-        self.workspace(id).await?;
-        self.store.workspace_members(id).await
-    }
-
-    pub async fn add_workspace_member(&self, id: &str, worker_id: &str) -> Result<()> {
-        self.workspace(id).await?;
-        if !self.is_registered(worker_id) {
-            return Err(ManagerError::NotFound(worker_id.to_string()).into());
-        }
-        self.store.add_workspace_member(id, worker_id).await
-    }
-
-    /// Remove a worker from a workspace and all of its channels.
-    pub async fn remove_workspace_member(&self, id: &str, worker_id: &str) -> Result<()> {
-        self.workspace(id).await?;
-        let mut affected = Vec::new();
-        for channel in self.store.list_channels(id).await? {
-            if self
-                .store
-                .last_seen(&channel.id, worker_id)
-                .await?
-                .is_some()
-            {
-                affected.push(channel.id);
-            }
-        }
-        self.store.remove_workspace_member(id, worker_id).await?;
-        for channel_id in affected {
-            self.emit(&channel_id, ChannelEventKind::Changed);
-        }
-        Ok(())
-    }
-
-    /// Channels a worker is about to lose (before it is deleted), so they can
-    /// be told their membership changed.
-    pub(crate) async fn channels_of(&self, worker_id: &str) -> Result<Vec<String>> {
-        let mut out = Vec::new();
-        for ws in self.store.worker_workspaces(worker_id).await? {
-            for channel in self.store.list_channels(&ws).await? {
-                if self
-                    .store
-                    .last_seen(&channel.id, worker_id)
-                    .await?
-                    .is_some()
-                {
-                    out.push(channel.id);
-                }
-            }
-        }
-        Ok(out)
-    }
-
-    pub(crate) fn changed(&self, channel_id: &str) {
-        self.emit(channel_id, ChannelEventKind::Changed);
-    }
-
-    // --- Channels ---------------------------------------------------------
-
-    pub async fn channels(&self, workspace_id: &str) -> Result<Vec<Channel>> {
-        self.workspace(workspace_id).await?;
-        self.store.list_channels(workspace_id).await
-    }
-
-    pub async fn channel(&self, id: &str) -> Result<Channel> {
-        self.store
-            .get_channel(id)
-            .await?
-            .ok_or_else(|| ManagerError::NoSuchChannel(id.to_string()).into())
-    }
-
-    /// Create a channel with initial worker members. Names are normalized
-    /// like handles (`Launch Plan` → `launch-plan`).
-    pub async fn create_channel(
+    /// Create a workspace with initial worker members. Names keep their
+    /// wording; whitespace is tidied and they must be unique within the team.
+    pub async fn create_workspace(
         &self,
-        workspace_id: &str,
+        team_id: &str,
         name: &str,
         topic: &str,
         members: &[WorkerId],
-    ) -> Result<Channel> {
-        self.workspace(workspace_id).await?;
-        let name = channel_name(name)?;
-        // Validate members up front so a bad id doesn't leave a half-made channel.
+    ) -> Result<Workspace> {
+        self.team(team_id).await?;
+        let name = workspace_name(name)?;
+        // Validate members up front so a bad id doesn't leave a half-made workspace.
         let mut handles = vec![OPERATOR_HANDLE.to_string()];
         for worker_id in members {
-            self.check_can_join(workspace_id, worker_id, &handles)
-                .await?;
+            self.check_can_join(team_id, worker_id, &handles).await?;
             handles.push(handle_for(&self.name_of(worker_id)));
         }
-        let channel = self
+        let workspace = self
             .store
-            .create_channel(workspace_id, &name, topic.trim())
+            .create_workspace(team_id, &name, topic.trim())
             .await?
-            .ok_or_else(|| ManagerError::Conflict(format!("channel #{name} already exists")))?;
+            .ok_or_else(|| {
+                ManagerError::Conflict(format!("a workspace named \"{name}\" already exists"))
+            })?;
         for worker_id in members {
             self.store
-                .add_channel_member(&channel.id, worker_id)
+                .add_workspace_member(&workspace.id, worker_id)
                 .await?;
         }
-        Ok(channel)
+        Ok(workspace)
     }
 
-    pub async fn update_channel(
+    pub async fn update_workspace(
         &self,
         id: &str,
         name: Option<&str>,
         topic: Option<&str>,
-    ) -> Result<Channel> {
-        let current = self.channel(id).await?;
+    ) -> Result<Workspace> {
+        let current = self.workspace(id).await?;
         let name = match name {
-            Some(name) => channel_name(name)?,
+            Some(name) => workspace_name(name)?,
             None => current.name,
         };
         let topic = topic.map_or(current.topic, |t| t.trim().to_string());
-        if !self.store.update_channel(id, &name, &topic).await? {
-            return Err(ManagerError::Conflict(format!("channel #{name} already exists")).into());
+        if !self.store.update_workspace(id, &name, &topic).await? {
+            return Err(ManagerError::Conflict(format!(
+                "a workspace named \"{name}\" already exists"
+            ))
+            .into());
         }
         self.changed(id);
-        self.channel(id).await
+        self.workspace(id).await
     }
 
-    pub async fn delete_channel(&self, id: &str) -> Result<()> {
-        self.channel(id).await?;
-        self.store.delete_channel(id).await?;
-        self.emit(id, ChannelEventKind::Deleted);
+    pub async fn delete_workspace(&self, id: &str) -> Result<()> {
+        self.workspace(id).await?;
+        self.store.delete_workspace(id).await?;
+        self.emit(id, WorkspaceEventKind::Deleted);
         Ok(())
     }
 
-    /// A channel's members with their handles, in join order. Members that
+    /// A workspace's members with their handles, in join order. Members that
     /// aren't running are described from the worker index.
-    pub async fn members(&self, channel_id: &str) -> Result<Vec<ChannelMember>> {
-        let ids = self.store.channel_members(channel_id).await?;
+    pub async fn members(&self, workspace_id: &str) -> Result<Vec<WorkspaceMember>> {
+        let ids = self.store.workspace_members(workspace_id).await?;
         let mut members = Vec::with_capacity(ids.len());
         let mut missing = Vec::new();
         {
@@ -351,55 +356,57 @@ impl ChannelHub {
         Ok(members)
     }
 
-    pub async fn add_member(&self, channel_id: &str, worker_id: &str) -> Result<()> {
-        let channel = self.channel(channel_id).await?;
-        let members = self.members(channel_id).await?;
+    pub async fn add_member(&self, workspace_id: &str, worker_id: &str) -> Result<()> {
+        let workspace = self.workspace(workspace_id).await?;
+        let members = self.members(workspace_id).await?;
         if members.iter().any(|m| m.worker_id == worker_id) {
             return Ok(());
         }
         let mut handles = vec![OPERATOR_HANDLE.to_string()];
         handles.extend(members.into_iter().map(|m| m.handle));
-        self.check_can_join(&channel.workspace_id, worker_id, &handles)
+        self.check_can_join(&workspace.team_id, worker_id, &handles)
             .await?;
-        self.store.add_channel_member(channel_id, worker_id).await?;
-        self.changed(channel_id);
+        self.store
+            .add_workspace_member(workspace_id, worker_id)
+            .await?;
+        self.changed(workspace_id);
         Ok(())
     }
 
-    pub async fn remove_member(&self, channel_id: &str, worker_id: &str) -> Result<()> {
-        self.channel(channel_id).await?;
+    pub async fn remove_member(&self, workspace_id: &str, worker_id: &str) -> Result<()> {
+        self.workspace(workspace_id).await?;
         self.store
-            .remove_channel_member(channel_id, worker_id)
+            .remove_workspace_member(workspace_id, worker_id)
             .await?;
-        self.changed(channel_id);
+        self.changed(workspace_id);
         Ok(())
     }
 
     async fn check_can_join(
         &self,
-        workspace_id: &str,
+        team_id: &str,
         worker_id: &str,
         taken_handles: &[String],
     ) -> Result<()> {
         if !self.is_registered(worker_id) {
             return Err(ManagerError::NotFound(worker_id.to_string()).into());
         }
-        let in_workspace = self
+        let in_team = self
             .store
-            .worker_workspaces(worker_id)
+            .worker_teams(worker_id)
             .await?
             .iter()
-            .any(|ws| ws == workspace_id);
+            .any(|ws| ws == team_id);
         let name = self.name_of(worker_id);
-        if !in_workspace {
+        if !in_team {
             return Err(
-                ManagerError::Invalid(format!("{name} isn't a member of this workspace")).into(),
+                ManagerError::Invalid(format!("{name} isn't a member of this team")).into(),
             );
         }
         let handle = handle_for(&name);
         if taken_handles.contains(&handle) {
             return Err(ManagerError::Conflict(format!(
-                "@{handle} is already taken in this channel; rename {name} first"
+                "@{handle} is already taken in this workspace; rename {name} first"
             ))
             .into());
         }
@@ -408,15 +415,15 @@ impl ChannelHub {
 
     // --- Posting and routing ----------------------------------------------
 
-    /// A channel's posts, oldest first.
-    pub async fn posts(&self, channel_id: &str) -> Result<Vec<ChannelPost>> {
-        self.store.list_posts(channel_id).await
+    /// A workspace's posts, oldest first.
+    pub async fn posts(&self, workspace_id: &str) -> Result<Vec<WorkspacePost>> {
+        self.store.list_posts(workspace_id).await
     }
 
-    /// A channel's notices, oldest first.
-    pub async fn notices(&self, channel_id: &str) -> Result<Vec<Notice>> {
+    /// A workspace's notices, oldest first.
+    pub async fn notices(&self, workspace_id: &str) -> Result<Vec<Notice>> {
         self.store
-            .load_conversation_notices(&Conversation::Channel(channel_id.to_string()))
+            .load_conversation_notices(&Conversation::Workspace(workspace_id.to_string()))
             .await
     }
 
@@ -425,15 +432,15 @@ impl ChannelHub {
     /// the background when that takes a model call).
     pub async fn post_operator(
         self: &Arc<Self>,
-        channel_id: &str,
+        workspace_id: &str,
         text: &str,
-    ) -> Result<ChannelPost> {
-        let channel = self.channel(channel_id).await?;
+    ) -> Result<WorkspacePost> {
+        let workspace = self.workspace(workspace_id).await?;
         let text = text.trim();
         if text.is_empty() {
             return Err(ManagerError::Invalid("post text must not be empty".into()).into());
         }
-        let members = self.members(channel_id).await?;
+        let members = self.members(workspace_id).await?;
         let mentions = resolve_mentions(text, &members, None);
         let candidates = if mentions.is_empty() {
             self.candidates(&members)
@@ -444,15 +451,15 @@ impl ChannelHub {
             0 => Routing::Direct,
             1 => Routing::Chosen {
                 worker_id: candidates[0].member.worker_id.clone(),
-                reason: "the only worker in this channel".into(),
+                reason: "the only worker in this workspace".into(),
             },
             _ => Routing::Pending,
         };
 
         let id = new_id();
-        let mut post = ChannelPost {
+        let mut post = WorkspacePost {
             id: id.clone(),
-            channel_id: channel_id.to_string(),
+            workspace_id: workspace_id.to_string(),
             seq: 0,
             author: Author::Operator,
             author_name: "You".to_string(),
@@ -465,14 +472,14 @@ impl ChannelHub {
         };
         // Context for the router: the posts before this one.
         let recent = if post.routing == Routing::Pending {
-            let mut all = self.store.list_posts(channel_id).await?;
+            let mut all = self.store.list_posts(workspace_id).await?;
             all.drain(..all.len().saturating_sub(CONTEXT_POSTS));
             all
         } else {
             Vec::new()
         };
         post.seq = self.store.append_post(&post).await?;
-        self.emit(channel_id, ChannelEventKind::Post(post.clone()));
+        self.emit(workspace_id, WorkspaceEventKind::Post(post.clone()));
 
         let trigger = Trigger {
             root_id: id,
@@ -480,18 +487,19 @@ impl ChannelHub {
         };
         match &post.routing {
             Routing::Chosen { worker_id, .. } => {
-                self.wake(channel_id, worker_id, &trigger).await;
+                self.wake(workspace_id, worker_id, &trigger).await;
             }
             Routing::Pending => {
                 let hub = self.clone();
                 let post = post.clone();
                 tokio::spawn(async move {
-                    hub.route(channel, candidates, recent, post, trigger).await;
+                    hub.route(workspace, candidates, recent, post, trigger)
+                        .await;
                 });
             }
             _ => {
                 for worker_id in &post.mentions {
-                    self.wake(channel_id, worker_id, &trigger).await;
+                    self.wake(workspace_id, worker_id, &trigger).await;
                 }
             }
         }
@@ -499,7 +507,7 @@ impl ChannelHub {
     }
 
     /// Running members the router may pick.
-    fn candidates(&self, members: &[ChannelMember]) -> Vec<Candidate> {
+    fn candidates(&self, members: &[WorkspaceMember]) -> Vec<Candidate> {
         let workers = self.workers.lock().unwrap();
         members
             .iter()
@@ -515,22 +523,22 @@ impl ChannelHub {
     /// Ask the router, record its decision on the post, and wake the pick.
     async fn route(
         &self,
-        channel: Channel,
+        workspace: Workspace,
         candidates: Vec<Candidate>,
-        recent: Vec<ChannelPost>,
-        post: ChannelPost,
+        recent: Vec<WorkspacePost>,
+        post: WorkspacePost,
         trigger: Trigger,
     ) {
         let routing = match self
             .router
-            .choose(&channel, &candidates, &recent, &post)
+            .choose(&workspace, &candidates, &recent, &post)
             .await
         {
             Ok(routing) => routing,
             Err(e) => {
-                tracing::warn!("routing a post in #{} failed: {e:#}", channel.name);
+                tracing::warn!("routing a post in \"{}\" failed: {e:#}", workspace.name);
                 self.notice(
-                    &channel.id,
+                    &workspace.id,
                     "",
                     NoticeLevel::Warning,
                     "Couldn't pick a worker to answer; @mention someone instead.",
@@ -545,14 +553,14 @@ impl ChannelHub {
             tracing::warn!("failed to persist routing: {e:#}");
         }
         self.emit(
-            &channel.id,
-            ChannelEventKind::Routed {
+            &workspace.id,
+            WorkspaceEventKind::Routed {
                 post_id: post.id.clone(),
                 routing: routing.clone(),
             },
         );
         if let Routing::Chosen { worker_id, .. } = &routing {
-            self.wake(&channel.id, worker_id, &trigger).await;
+            self.wake(&workspace.id, worker_id, &trigger).await;
         }
     }
 
@@ -560,16 +568,16 @@ impl ChannelHub {
     /// [`HOP_LIMIT`].
     pub(crate) async fn post_reply(
         &self,
-        channel_id: &str,
+        workspace_id: &str,
         worker_id: &str,
         text: &str,
         trigger: &Trigger,
     ) -> Result<()> {
-        let members = self.members(channel_id).await?;
+        let members = self.members(workspace_id).await?;
         let hops = trigger.hops + 1;
-        let mut post = ChannelPost {
+        let mut post = WorkspacePost {
             id: new_id(),
-            channel_id: channel_id.to_string(),
+            workspace_id: workspace_id.to_string(),
             seq: 0,
             author: Author::Worker(worker_id.to_string()),
             author_name: self.name_of(worker_id),
@@ -583,16 +591,16 @@ impl ChannelHub {
         post.seq = self.store.append_post(&post).await?;
         // The author has seen its own post.
         self.store
-            .set_last_seen(channel_id, worker_id, post.seq)
+            .set_last_seen(workspace_id, worker_id, post.seq)
             .await?;
-        self.emit(channel_id, ChannelEventKind::Post(post.clone()));
+        self.emit(workspace_id, WorkspaceEventKind::Post(post.clone()));
 
         if post.mentions.is_empty() {
             return Ok(());
         }
         if hops >= HOP_LIMIT {
             self.notice(
-                channel_id,
+                workspace_id,
                 "",
                 NoticeLevel::Warning,
                 format!(
@@ -607,22 +615,22 @@ impl ChannelHub {
             hops,
         };
         for mentioned in &post.mentions {
-            self.wake(channel_id, mentioned, &next).await;
+            self.wake(workspace_id, mentioned, &next).await;
         }
         Ok(())
     }
 
-    /// Queue a channel turn on a worker without blocking: a stopped worker or
+    /// Queue a workspace turn on a worker without blocking: a stopped worker or
     /// a full mailbox becomes a notice instead.
-    async fn wake(&self, channel_id: &str, worker_id: &str, trigger: &Trigger) {
+    async fn wake(&self, workspace_id: &str, worker_id: &str, trigger: &Trigger) {
         let tx = self
             .workers
             .lock()
             .unwrap()
             .get(worker_id)
             .and_then(|w| w.tx.upgrade());
-        let stimulus = Stimulus::ChannelTurn {
-            channel_id: channel_id.to_string(),
+        let stimulus = Stimulus::WorkspaceTurn {
+            workspace_id: workspace_id.to_string(),
             trigger: trigger.clone(),
         };
         let failure = match tx.map(|tx| tx.try_send(stimulus)) {
@@ -632,7 +640,7 @@ impl ChannelHub {
         };
         let name = self.name_of(worker_id);
         self.notice(
-            channel_id,
+            workspace_id,
             worker_id,
             NoticeLevel::Warning,
             format!("{name} {failure}"),
@@ -640,25 +648,25 @@ impl ChannelHub {
         .await;
     }
 
-    /// Build a worker's next turn in a channel from the posts it hasn't seen,
+    /// Build a worker's next turn in a workspace from the posts it hasn't seen,
     /// marking them seen. `None` if it isn't a member or nothing is new.
     pub(crate) async fn prepare_turn(
         &self,
-        channel_id: &str,
+        workspace_id: &str,
         worker_id: &str,
     ) -> Result<Option<Turn>> {
-        let Some(last_seen) = self.store.last_seen(channel_id, worker_id).await? else {
+        let Some(last_seen) = self.store.last_seen(workspace_id, worker_id).await? else {
             return Ok(None);
         };
-        let Some(channel) = self.store.get_channel(channel_id).await? else {
+        let Some(workspace) = self.store.get_workspace(workspace_id).await? else {
             return Ok(None);
         };
-        let posts = self.store.posts_after(channel_id, last_seen).await?;
+        let posts = self.store.posts_after(workspace_id, last_seen).await?;
         let Some(through) = posts.last().map(|p| p.seq) else {
             return Ok(None);
         };
         self.store
-            .set_last_seen(channel_id, worker_id, through)
+            .set_last_seen(workspace_id, worker_id, through)
             .await?;
 
         let mut unseen: Vec<_> = posts
@@ -671,23 +679,23 @@ impl ChannelHub {
         let omitted = unseen.len().saturating_sub(BACKLOG_LIMIT);
         unseen.drain(..omitted);
 
-        let members = self.members(channel_id).await?;
+        let members = self.members(workspace_id).await?;
         let Some(me) = members.iter().find(|m| m.worker_id == worker_id) else {
             return Ok(None);
         };
-        let workspace = self
+        let team = self
             .store
-            .get_workspace(&channel.workspace_id)
+            .get_team(&workspace.team_id)
             .await?
             .map(|w| w.name)
             .unwrap_or_default();
-        let prompt = render_turn(&workspace, &channel, &members, me, &unseen, omitted);
-        Ok(Some(Turn { channel, prompt }))
+        let prompt = render_turn(&team, &workspace, &members, me, &unseen, omitted);
+        Ok(Some(Turn { workspace, prompt }))
     }
 }
 
-fn member(worker_id: WorkerId, name: &str, description: &str) -> ChannelMember {
-    ChannelMember {
+fn member(worker_id: WorkerId, name: &str, description: &str) -> WorkspaceMember {
+    WorkspaceMember {
         worker_id,
         name: name.to_string(),
         handle: handle_for(name),
@@ -696,7 +704,11 @@ fn member(worker_id: WorkerId, name: &str, description: &str) -> ChannelMember {
 }
 
 /// The member workers `text` mentions, excluding `author`.
-fn resolve_mentions(text: &str, members: &[ChannelMember], author: Option<&str>) -> Vec<WorkerId> {
+fn resolve_mentions(
+    text: &str,
+    members: &[WorkspaceMember],
+    author: Option<&str>,
+) -> Vec<WorkerId> {
     let mut out = Vec::new();
     for handle in parse_mentions(text) {
         if let Some(m) = members.iter().find(|m| m.handle == handle)
@@ -709,13 +721,17 @@ fn resolve_mentions(text: &str, members: &[ChannelMember], author: Option<&str>)
     out
 }
 
-/// Normalize a channel name: lowercase words joined by `-`.
-fn channel_name(raw: &str) -> Result<String> {
-    if raw.trim().is_empty() || !raw.chars().any(|c| c.is_ascii_alphanumeric()) {
-        return Err(ManagerError::Invalid(
-            "channel names need at least one letter or digit".into(),
-        )
+/// Normalize a workspace name: trimmed, inner whitespace collapsed.
+fn workspace_name(raw: &str) -> Result<String> {
+    let name = raw.split_whitespace().collect::<Vec<_>>().join(" ");
+    if name.is_empty() {
+        return Err(ManagerError::Invalid("workspace names must not be empty".into()).into());
+    }
+    if name.chars().count() > MAX_WORKSPACE_NAME {
+        return Err(ManagerError::Invalid(format!(
+            "workspace names are at most {MAX_WORKSPACE_NAME} characters"
+        ))
         .into());
     }
-    Ok(handle_for(raw))
+    Ok(name)
 }

@@ -7,7 +7,6 @@
 
 pub mod api;
 pub mod bindings;
-pub mod channel;
 pub mod event;
 pub mod home;
 pub mod home_tools;
@@ -15,6 +14,7 @@ pub mod manager;
 pub mod skills;
 pub mod store;
 pub mod worker;
+pub mod workspace;
 
 /// Stable identifier for a worker (UUID-v4 string, from the engine).
 pub type WorkerId = subspace::types::Id;

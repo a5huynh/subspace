@@ -8,8 +8,8 @@ use anyhow::{Context, Result};
 use clap::Parser;
 use subspace::provider::Provider;
 use subspace::provider::anthropic::AnthropicProvider;
-use subspace_server::channel::router::DEFAULT_ROUTER_MODEL;
 use subspace_server::store::SqliteStore;
+use subspace_server::workspace::router::DEFAULT_ROUTER_MODEL;
 use subspace_server::{Homes, WorkerManager, api};
 use tracing_subscriber::EnvFilter;
 
@@ -28,7 +28,7 @@ struct Cli {
     #[arg(long, env = "SUBSPACE_BIND", default_value = "127.0.0.1:7700")]
     bind: SocketAddr,
 
-    /// Model that picks who answers channel posts mentioning nobody
+    /// Model that picks who answers workspace posts mentioning nobody
     #[arg(long, env = "SUBSPACE_ROUTER_MODEL", default_value = DEFAULT_ROUTER_MODEL)]
     router_model: String,
 

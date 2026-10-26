@@ -1,8 +1,8 @@
-//! Workspaces, channels, and DMs: the shared-conversation model.
+//! Teams, workspaces, and DMs: the shared-conversation model.
 //!
-//! A channel's public transcript is a list of [`ChannelPost`]s. Each worker
+//! A workspace's public transcript is a list of [`WorkspacePost`]s. Each worker
 //! that takes part keeps its own private session per [`Conversation`]; a
-//! channel turn renders the posts it hasn't seen into one user message.
+//! workspace turn renders the posts it hasn't seen into one user message.
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -13,16 +13,16 @@ use crate::WorkerId;
 pub mod hub;
 pub mod router;
 
+pub type TeamId = String;
 pub type WorkspaceId = String;
-pub type ChannelId = String;
 
-/// Name of the workspace seeded on first boot.
-pub const DEFAULT_WORKSPACE: &str = "General";
+/// Name of the team seeded on first boot.
+pub const DEFAULT_TEAM: &str = "General";
 /// Worker-to-worker hops allowed per operator post before routing stops.
 pub const HOP_LIMIT: u32 = 5;
-/// At most this many unseen posts are shown in one channel turn.
+/// At most this many unseen posts are shown in one workspace turn.
 pub const BACKLOG_LIMIT: usize = 50;
-/// The operator's handle in channels.
+/// The operator's handle in workspaces.
 pub const OPERATOR_HANDLE: &str = "you";
 
 /// Which of a worker's sessions a message belongs to.
@@ -30,7 +30,7 @@ pub const OPERATOR_HANDLE: &str = "you";
 pub enum Conversation {
     /// The worker's 1:1 conversation with the operator.
     Dm,
-    Channel(ChannelId),
+    Workspace(WorkspaceId),
 }
 
 impl Conversation {
@@ -38,22 +38,22 @@ impl Conversation {
     pub fn key(&self) -> String {
         match self {
             Self::Dm => "dm".to_string(),
-            Self::Channel(id) => format!("channel:{id}"),
+            Self::Workspace(id) => format!("workspace:{id}"),
         }
     }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, TS)]
-pub struct Workspace {
-    pub id: WorkspaceId,
+pub struct Team {
+    pub id: TeamId,
     pub name: String,
     pub created_at: DateTime<Utc>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, TS)]
-pub struct Channel {
-    pub id: ChannelId,
-    pub workspace_id: WorkspaceId,
+pub struct Workspace {
+    pub id: WorkspaceId,
+    pub team_id: TeamId,
     pub name: String,
     pub topic: String,
     pub created_at: DateTime<Utc>,
@@ -68,12 +68,12 @@ pub enum Author {
     Worker(WorkerId),
 }
 
-/// One post in a channel's public transcript.
+/// One post in a workspace's public transcript.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, TS)]
-pub struct ChannelPost {
+pub struct WorkspacePost {
     pub id: String,
-    pub channel_id: ChannelId,
-    /// Position in the transcript (increasing; not contiguous per channel).
+    pub workspace_id: WorkspaceId,
+    /// Position in the transcript (increasing; not contiguous per workspace).
     pub seq: u64,
     pub author: Author,
     /// The author's display name when the post was written.
@@ -94,7 +94,7 @@ pub struct ChannelPost {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(tag = "state", rename_all = "snake_case")]
 pub enum Routing {
-    /// Not routed: it mentions workers, comes from a worker, or the channel
+    /// Not routed: it mentions workers, comes from a worker, or the workspace
     /// has no running workers.
     Direct,
     /// The router is choosing.
@@ -113,9 +113,9 @@ pub enum Routing {
     },
 }
 
-/// A worker's membership in a channel, as shown to clients.
+/// A worker's membership in a workspace, as shown to clients.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, TS)]
-pub struct ChannelMember {
+pub struct WorkspaceMember {
     pub worker_id: WorkerId,
     pub name: String,
     pub handle: String,
@@ -170,17 +170,17 @@ pub fn parse_mentions(text: &str) -> Vec<String> {
     out
 }
 
-/// The user message for a channel turn: who is here, who the worker is, and
+/// The user message for a workspace turn: who is here, who the worker is, and
 /// the posts it hasn't seen yet.
 pub fn render_turn(
-    workspace: &str,
-    channel: &Channel,
-    members: &[ChannelMember],
-    me: &ChannelMember,
-    posts: &[ChannelPost],
+    team: &str,
+    workspace: &Workspace,
+    members: &[WorkspaceMember],
+    me: &WorkspaceMember,
+    posts: &[WorkspacePost],
     omitted: usize,
 ) -> String {
-    let handle_of = |post: &ChannelPost| match &post.author {
+    let handle_of = |post: &WorkspacePost| match &post.author {
         Author::Operator => OPERATOR_HANDLE.to_string(),
         Author::Worker(id) => members
             .iter()
@@ -198,11 +198,11 @@ pub fn render_turn(
     }
 
     let mut out = format!(
-        "<channel name=\"{}\" workspace=\"{}\">\n",
-        channel.name, workspace
+        "<workspace name=\"{}\" team=\"{}\">\n",
+        workspace.name, team
     );
-    if !channel.topic.is_empty() {
-        out.push_str(&format!("Topic: {}\n", channel.topic));
+    if !workspace.topic.is_empty() {
+        out.push_str(&format!("Topic: {}\n", workspace.topic));
     }
     out.push_str(&format!("Members: {}\n", roster.join(", ")));
     out.push_str(&format!("You are @{}.\n", me.handle));
@@ -213,9 +213,9 @@ pub fn render_turn(
     for post in posts {
         out.push_str(&format!("[@{}] {}\n", handle_of(post), post.text));
     }
-    out.push_str("</channel>\n");
+    out.push_str("</workspace>\n");
     out.push_str(
-        "Reply with your next post in this channel. Mention @handle to ask a member to respond.",
+        "Reply with your next post in this workspace. Mention @handle to ask a member to respond.",
     );
     out
 }

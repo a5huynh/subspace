@@ -1,4 +1,4 @@
-//! Events emitted by workers and channels, wrapped with attribution for the
+//! Events emitted by workers and workspaces, wrapped with attribution for the
 //! console, plus the [`EventLog`] that numbers, buffers, and publishes them.
 
 use std::collections::{HashMap, VecDeque};
@@ -12,8 +12,8 @@ use tokio::sync::broadcast;
 use ts_rs::TS;
 
 use crate::WorkerId;
-use crate::channel::{ChannelId, ChannelPost, Routing};
 use crate::worker::WorkerStatus;
+use crate::workspace::{Routing, WorkspaceId, WorkspacePost};
 
 /// How many recent events each worker keeps for stream replay.
 pub const EVENT_BUFFER_CAPACITY: usize = 4096;
@@ -77,34 +77,34 @@ impl Notice {
     }
 }
 
-/// An event in a channel's log: posts, notices, and the live activity of
+/// An event in a workspace's log: posts, notices, and the live activity of
 /// workers taking a turn there.
 #[derive(Debug, Clone, Serialize, TS)]
-pub struct ChannelEvent {
-    pub channel_id: ChannelId,
-    /// Monotonic per-channel sequence number, starting at 1 (per epoch).
+pub struct WorkspaceEvent {
+    pub workspace_id: WorkspaceId,
+    /// Monotonic per-workspace sequence number, starting at 1 (per epoch).
     pub seq: u64,
     pub ts: DateTime<Utc>,
-    pub inner: ChannelEventKind,
+    pub inner: WorkspaceEventKind,
 }
 
 #[derive(Debug, Clone, Serialize, TS)]
 #[serde(tag = "type", content = "data", rename_all = "snake_case")]
-pub enum ChannelEventKind {
+pub enum WorkspaceEventKind {
     /// A post was persisted (stable id; merge with fetched posts).
-    Post(ChannelPost),
+    Post(WorkspacePost),
     /// An operator post's routing was decided (or failed).
     Routed { post_id: String, routing: Routing },
     /// A persisted notice: a failed turn, the hop limit, an undeliverable wake.
     Notice(Notice),
-    /// Live activity from a worker taking its turn in this channel.
+    /// Live activity from a worker taking its turn in this workspace.
     Worker {
         worker_id: WorkerId,
         event: WorkerEvent,
     },
-    /// Name, topic, or membership changed; refetch the channel.
+    /// Name, topic, or membership changed; refetch the workspace.
     Changed,
-    /// The channel was deleted.
+    /// The workspace was deleted.
     Deleted,
 }
 
@@ -145,12 +145,12 @@ impl LogEvent for ServerEvent {
     }
 }
 
-impl LogEvent for ChannelEvent {
-    type Inner = ChannelEventKind;
+impl LogEvent for WorkspaceEvent {
+    type Inner = WorkspaceEventKind;
 
-    fn wrap(source: &str, seq: u64, inner: ChannelEventKind) -> Self {
+    fn wrap(source: &str, seq: u64, inner: WorkspaceEventKind) -> Self {
         Self {
-            channel_id: source.to_string(),
+            workspace_id: source.to_string(),
             seq,
             ts: Utc::now(),
             inner,
@@ -161,9 +161,9 @@ impl LogEvent for ChannelEvent {
         self.seq
     }
 
-    fn run_edge(inner: &ChannelEventKind) -> Option<(String, bool)> {
+    fn run_edge(inner: &WorkspaceEventKind) -> Option<(String, bool)> {
         match inner {
-            ChannelEventKind::Worker {
+            WorkspaceEventKind::Worker {
                 worker_id,
                 event: WorkerEvent::StatusChanged(status),
             } => Some((worker_id.clone(), *status == WorkerStatus::Running)),
@@ -189,7 +189,7 @@ struct LogState<E> {
 }
 
 /// Numbers, buffers, and publishes one source's events (a worker's or a
-/// channel's). Kept across worker restarts so `seq` never goes backwards
+/// workspace's). Kept across worker restarts so `seq` never goes backwards
 /// within an epoch.
 pub struct EventLog<E: LogEvent = ServerEvent> {
     source: String,
@@ -197,8 +197,8 @@ pub struct EventLog<E: LogEvent = ServerEvent> {
     state: Mutex<LogState<E>>,
 }
 
-/// A channel's event log.
-pub type ChannelLog = EventLog<ChannelEvent>;
+/// A workspace's event log.
+pub type WorkspaceLog = EventLog<WorkspaceEvent>;
 
 impl<E: LogEvent> EventLog<E> {
     pub fn new(source: impl Into<String>, bus: broadcast::Sender<E>) -> Self {

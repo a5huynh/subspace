@@ -3,11 +3,11 @@ import type { Author } from "./Author";
 import type { Routing } from "./Routing";
 
 /**
- * One post in a channel's public transcript.
+ * One post in a workspace's public transcript.
  */
-export type ChannelPost = { id: string, channel_id: string, 
+export type WorkspacePost = { id: string, workspace_id: string, 
 /**
- * Position in the transcript (increasing; not contiguous per channel).
+ * Position in the transcript (increasing; not contiguous per workspace).
  */
 seq: number, author: Author, 
 /**

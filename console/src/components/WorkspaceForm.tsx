@@ -1,44 +1,44 @@
 import { useCallback, useEffect, useState, type FormEvent } from 'react'
 
 import { api } from '../api/client'
-import type { ChannelDetail } from '../api/generated/ChannelDetail'
-import type { ChannelMember } from '../api/generated/ChannelMember'
-import type { WorkerSummary } from '../api/generated/WorkerSummary'
 import type { WorkspaceDetail } from '../api/generated/WorkspaceDetail'
+import type { WorkspaceMember } from '../api/generated/WorkspaceMember'
+import type { WorkerSummary } from '../api/generated/WorkerSummary'
+import type { TeamDetail } from '../api/generated/TeamDetail'
 import { href, navigate } from '../route'
 import { Avatar, Panel } from './ui'
 
 interface Props {
-  workspace: WorkspaceDetail | null
+  team: TeamDetail | null
   workers: WorkerSummary[] | null
   onChanged: () => void
 }
 
 const message = (e: unknown) => (e instanceof Error ? e.message : String(e))
 
-/** Workers in the workspace, with their names, in sidebar order. */
-function workspaceWorkers(workspace: WorkspaceDetail | null, workers: WorkerSummary[] | null) {
-  const ids = new Set(workspace?.members ?? [])
+/** Workers in the team, with their names, in sidebar order. */
+function teamWorkers(team: TeamDetail | null, workers: WorkerSummary[] | null) {
+  const ids = new Set(team?.members ?? [])
   return (workers ?? []).filter((w) => ids.has(w.id))
 }
 
-export function NewChannelForm({ workspace, workers, onChanged }: Props) {
+export function NewWorkspaceForm({ team, workers, onChanged }: Props) {
   const [name, setName] = useState('')
   const [topic, setTopic] = useState('')
   const [members, setMembers] = useState<string[]>([])
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState<string | null>(null)
-  const candidates = workspaceWorkers(workspace, workers)
+  const candidates = teamWorkers(team, workers)
 
   const submit = async (e: FormEvent) => {
     e.preventDefault()
-    if (!workspace) return
+    if (!team) return
     setSaving(true)
     setError(null)
     try {
-      const channel = await api.createChannel(workspace.workspace.id, { name, topic, members })
+      const workspace = await api.createWorkspace(team.team.id, { name, topic, members })
       onChanged()
-      navigate({ page: 'channel', id: channel.id })
+      navigate({ page: 'workspace', id: workspace.id })
     } catch (err) {
       setError(message(err))
     } finally {
@@ -50,7 +50,7 @@ export function NewChannelForm({ workspace, workers, onChanged }: Props) {
     setMembers((m) => (m.includes(id) ? m.filter((x) => x !== id) : [...m, id]))
 
   return (
-    <Panel title="Create a channel">
+    <Panel title="Create a workspace">
       <form className="flex flex-col gap-5" onSubmit={submit}>
         <label className="label">
           Name
@@ -58,7 +58,7 @@ export function NewChannelForm({ workspace, workers, onChanged }: Props) {
             className="field"
             value={name}
             onChange={(e) => setName(e.target.value)}
-            placeholder="e.g. launch-plan"
+            placeholder="e.g. Q3 launch plan"
             required
             autoFocus
           />
@@ -69,7 +69,7 @@ export function NewChannelForm({ workspace, workers, onChanged }: Props) {
             className="field"
             value={topic}
             onChange={(e) => setTopic(e.target.value)}
-            placeholder="What this channel is working on"
+            placeholder="What the team is working on here"
           />
         </label>
         <fieldset className="flex flex-col gap-1 rounded-md border border-line p-3">
@@ -96,8 +96,8 @@ export function NewChannelForm({ workspace, workers, onChanged }: Props) {
 
         {error && <p className="text-danger">{error}</p>}
         <div>
-          <button type="submit" className="btn-primary" disabled={saving || !workspace}>
-            Create channel
+          <button type="submit" className="btn-primary" disabled={saving || !team}>
+            Create workspace
           </button>
         </div>
       </form>
@@ -105,23 +105,23 @@ export function NewChannelForm({ workspace, workers, onChanged }: Props) {
   )
 }
 
-export function ChannelSettings({ id, workspace, workers, onChanged }: Props & { id: string }) {
+export function WorkspaceSettings({ id, team, workers, onChanged }: Props & { id: string }) {
   const [name, setName] = useState<string | null>(null)
   const [topic, setTopic] = useState('')
-  const [members, setMembers] = useState<ChannelMember[]>([])
+  const [members, setMembers] = useState<WorkspaceMember[]>([])
   const [adding, setAdding] = useState('')
   const [error, setError] = useState<string | null>(null)
   const [saved, setSaved] = useState(false)
 
-  const apply = useCallback((detail: ChannelDetail) => {
-    setName(detail.channel.name)
-    setTopic(detail.channel.topic)
+  const apply = useCallback((detail: WorkspaceDetail) => {
+    setName(detail.workspace.name)
+    setTopic(detail.workspace.topic)
     setMembers(detail.members)
   }, [])
 
   useEffect(() => {
     let cancelled = false
-    api.getChannel(id).then(
+    api.getWorkspace(id).then(
       (detail) => !cancelled && apply(detail),
       (e: unknown) => !cancelled && setError(message(e)),
     )
@@ -132,7 +132,7 @@ export function ChannelSettings({ id, workspace, workers, onChanged }: Props & {
 
   if (name === null) {
     return (
-      <Panel title="Channel settings">
+      <Panel title="Workspace settings">
         {error ? <p className="text-danger">{error}</p> : <p className="text-muted">Loading…</p>}
       </Panel>
     )
@@ -143,7 +143,7 @@ export function ChannelSettings({ id, workspace, workers, onChanged }: Props & {
     setSaved(false)
     try {
       await action()
-      apply(await api.getChannel(id))
+      apply(await api.getWorkspace(id))
       onChanged()
       return true
     } catch (err) {
@@ -154,13 +154,13 @@ export function ChannelSettings({ id, workspace, workers, onChanged }: Props & {
 
   const save = async (e: FormEvent) => {
     e.preventDefault()
-    if (await run(() => api.updateChannel(id, { name, topic }))) setSaved(true)
+    if (await run(() => api.updateWorkspace(id, { name, topic }))) setSaved(true)
   }
 
   const remove = async () => {
-    if (!confirm(`Delete #${name}? This removes its posts and every member's session in it.`)) return
+    if (!confirm(`Delete ${name}? This removes its posts and every member's session in it.`)) return
     try {
-      await api.deleteChannel(id)
+      await api.deleteWorkspace(id)
       onChanged()
       navigate({ page: 'home' })
     } catch (err) {
@@ -169,10 +169,10 @@ export function ChannelSettings({ id, workspace, workers, onChanged }: Props & {
   }
 
   const memberIds = new Set(members.map((m) => m.worker_id))
-  const addable = workspaceWorkers(workspace, workers).filter((w) => !memberIds.has(w.id))
+  const addable = teamWorkers(team, workers).filter((w) => !memberIds.has(w.id))
 
   return (
-    <Panel title={<># {name} settings</>}>
+    <Panel title={`${name} settings`}>
       <form className="flex flex-col gap-5" onSubmit={save}>
         <label className="label">
           Name
@@ -186,8 +186,8 @@ export function ChannelSettings({ id, workspace, workers, onChanged }: Props & {
           <button type="submit" className="btn-primary">
             Save
           </button>
-          <a className="btn-secondary" href={href({ page: 'channel', id })}>
-            Back to channel
+          <a className="btn-secondary" href={href({ page: 'workspace', id })}>
+            Back to workspace
           </a>
         </div>
       </form>
@@ -207,7 +207,7 @@ export function ChannelSettings({ id, workspace, workers, onChanged }: Props & {
             <button
               type="button"
               className="btn-secondary ml-auto py-0.5 text-xs"
-              onClick={() => void run(() => api.removeChannelMember(id, m.worker_id))}
+              onClick={() => void run(() => api.removeWorkspaceMember(id, m.worker_id))}
             >
               Remove
             </button>
@@ -234,7 +234,7 @@ export function ChannelSettings({ id, workspace, workers, onChanged }: Props & {
             className="btn-primary"
             disabled={!adding}
             onClick={() =>
-              void run(() => api.addChannelMember(id, adding)).then((ok) => ok && setAdding(''))
+              void run(() => api.addWorkspaceMember(id, adding)).then((ok) => ok && setAdding(''))
             }
           >
             Add
@@ -247,7 +247,7 @@ export function ChannelSettings({ id, workspace, workers, onChanged }: Props & {
 
       <div className="mt-10 border-t border-line pt-5">
         <button type="button" className="btn-danger" onClick={() => void remove()}>
-          Delete channel
+          Delete workspace
         </button>
       </div>
     </Panel>

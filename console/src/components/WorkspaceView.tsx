@@ -1,13 +1,13 @@
 import { useMemo, type ReactNode } from 'react'
 
 import { api } from '../api/client'
-import type { ChannelMember } from '../api/generated/ChannelMember'
+import type { WorkspaceMember } from '../api/generated/WorkspaceMember'
 import type { Routing } from '../api/generated/Routing'
-import { channelTimeline } from '../chat/channel'
+import { workspaceTimeline } from '../chat/workspace'
 import { layoutRows } from '../chat/format'
 import { OPERATOR_HANDLE, segments } from '../chat/mentions'
 import { isToolResultMessage, toolResults, type ChatState } from '../chat/state'
-import { useChannel } from '../chat/useChannel'
+import { useWorkspace } from '../chat/useWorkspace'
 import { href } from '../route'
 import { useNow } from '../useNow'
 import { useScrollToBottom } from '../useScrollToBottom'
@@ -22,10 +22,11 @@ import {
   MessageList,
   MessageRow,
   NoticeRow,
+  WorkspaceIcon,
 } from './ui'
 
-export function ChannelView({ id }: { id: string }) {
-  const { state, connected, error } = useChannel(id)
+export function WorkspaceView({ id }: { id: string }) {
+  const { state, connected, error } = useWorkspace(id)
   const now = useNow()
   const scroller = useScrollToBottom([state.posts, state.notices, state.running])
   const known = useMemo(
@@ -36,17 +37,17 @@ export function ChannelView({ id }: { id: string }) {
   if (state.deleted) {
     return (
       <EmptyState>
-        This channel was deleted. <a href={href({ page: 'home' })}>Back home</a>
+        This workspace was deleted. <a href={href({ page: 'home' })}>Back home</a>
       </EmptyState>
     )
   }
 
-  const channel = state.channel
+  const workspace = state.workspace
   const nameOf = (workerId: string) =>
     state.members.find((m) => m.worker_id === workerId)?.name ?? 'A worker'
   const renderText = (text: string) => <PostText text={text} known={known} />
 
-  const items = channelTimeline(state)
+  const items = workspaceTimeline(state)
   const running = Object.entries(state.running)
   const layout = layoutRows([
     ...items.map((item) =>
@@ -67,24 +68,24 @@ export function ChannelView({ id }: { id: string }) {
       <ConversationHeader
         title={
           <>
-            <span className="font-normal text-muted">#</span>
-            <span className="truncate">{channel?.name ?? '…'}</span>
+            <WorkspaceIcon className="size-5 text-muted" />
+            <span className="truncate">{workspace?.name ?? '…'}</span>
           </>
         }
-        subtitle={channel?.topic || undefined}
+        subtitle={workspace?.topic || undefined}
         right={
           <>
             <ConnectionDot connected={connected} />
-            <MemberStack members={state.members} channelId={id} />
+            <MemberStack members={state.members} workspaceId={id} />
           </>
         }
       />
 
       <MessageList scroller={scroller}>
         {error && <p className="px-5 text-[13px] text-danger">{error}</p>}
-        {channel && items.length === 0 && running.length === 0 && (
+        {workspace && items.length === 0 && running.length === 0 && (
           <EmptyState>
-            <span className="mb-1 block text-lg font-black text-ink">Welcome to #{channel.name}</span>
+            <span className="mb-1 block text-lg font-black text-ink">Welcome to {workspace.name}</span>
             {state.members.length === 0
               ? 'Add workers in Settings to get them talking.'
               : 'Ask anything: the best-suited member answers, or @mention someone directly.'}
@@ -122,7 +123,7 @@ export function ChannelView({ id }: { id: string }) {
       </MessageList>
 
       <Composer
-        placeholder={`Message #${channel?.name ?? ''}`}
+        placeholder={`Message ${workspace?.name ?? 'the workspace'}`}
         members={state.members}
         onSend={async (text) => {
           await api.post(id, text)
@@ -132,12 +133,12 @@ export function ChannelView({ id }: { id: string }) {
   )
 }
 
-/** Overlapping member avatars that open the channel's settings. */
-function MemberStack({ members, channelId }: { members: ChannelMember[]; channelId: string }) {
+/** Overlapping member avatars that open the workspace's settings. */
+function MemberStack({ members, workspaceId }: { members: WorkspaceMember[]; workspaceId: string }) {
   const shown = members.slice(0, 3)
   return (
     <a
-      href={href({ page: 'channel-settings', id: channelId })}
+      href={href({ page: 'workspace-settings', id: workspaceId })}
       className="btn-secondary gap-2 py-1 pl-1.5"
       title={['You', ...members.map((m) => `${m.name} (@${m.handle})`)].join('\n')}
     >
@@ -186,7 +187,7 @@ function RoutingNote({ routing, nameOf }: { routing: Routing; nameOf: (workerId:
   switch (routing.state) {
     case 'direct':
     case 'failed':
-      // Failures are explained by a channel notice.
+      // Failures are explained by a workspace notice.
       return null
     case 'pending':
       return note('Choosing who should answer…', 'animate-pulse')

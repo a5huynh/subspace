@@ -1,4 +1,4 @@
-// Presentation helpers shared by DMs and channels: times, day dividers,
+// Presentation helpers shared by DMs and workspaces: times, day dividers,
 // avatars, grouping consecutive messages, and readable notices.
 
 /** "9:36 PM" (locale-aware, no leading zero). */

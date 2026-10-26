@@ -1,22 +1,22 @@
 import type { ReactNode } from 'react'
 
 import type { WorkerSummary } from '../api/generated/WorkerSummary'
-import type { WorkspaceDetail } from '../api/generated/WorkspaceDetail'
+import type { TeamDetail } from '../api/generated/TeamDetail'
 import { href, type Route } from '../route'
-import { Avatar } from './ui'
+import { Avatar, WorkspaceIcon } from './ui'
 
 interface Props {
-  workspace: WorkspaceDetail | null
+  team: TeamDetail | null
   workers: WorkerSummary[] | null
   error: string | null
   route: Route
 }
 
-export function Sidebar({ workspace, workers, error, route }: Props) {
+export function Sidebar({ team, workers, error, route }: Props) {
   const selectedWorker = route.page === 'worker' || route.page === 'settings' ? route.id : null
-  const selectedChannel =
-    route.page === 'channel' || route.page === 'channel-settings' ? route.id : null
-  const channels = workspace?.channels ?? []
+  const selectedWorkspace =
+    route.page === 'workspace' || route.page === 'workspace-settings' ? route.id : null
+  const workspaces = team?.workspaces ?? []
 
   return (
     <nav className="flex min-h-0 flex-col bg-sidebar text-sidebar-muted">
@@ -24,7 +24,7 @@ export function Sidebar({ workspace, workers, error, route }: Props) {
         href={href({ page: 'home' })}
         className="flex h-[57px] shrink-0 items-center gap-2 border-b border-sidebar-line px-4 text-lg font-black text-sidebar-ink no-underline hover:no-underline"
       >
-        <span className="truncate">{workspace?.workspace.name ?? 'Subspace'}</span>
+        <span className="truncate">{team?.team.name ?? 'Subspace'}</span>
         <span className="text-xs font-normal text-sidebar-muted">Subspace</span>
       </a>
 
@@ -35,17 +35,19 @@ export function Sidebar({ workspace, workers, error, route }: Props) {
           </p>
         )}
 
-        <Section title="Channels" add={href({ page: 'new-channel' })} addLabel="Create a channel">
-          {channels.map((c) => (
-            <Item key={c.id} href={href({ page: 'channel', id: c.id })} selected={c.id === selectedChannel}>
-              <span className="w-5 text-center opacity-70">#</span>
+        <Section title="Workspaces" add={href({ page: 'new-workspace' })} addLabel="Create a workspace">
+          {workspaces.map((c) => (
+            <Item key={c.id} href={href({ page: 'workspace', id: c.id })} selected={c.id === selectedWorkspace}>
+              <span className="flex w-5 justify-center opacity-80">
+                <WorkspaceIcon />
+              </span>
               <span className="truncate">{c.name}</span>
             </Item>
           ))}
-          {workspace && channels.length === 0 && (
-            <Item href={href({ page: 'new-channel' })}>
+          {team && workspaces.length === 0 && (
+            <Item href={href({ page: 'new-workspace' })}>
               <span className="w-5 text-center">+</span>
-              <span>Add a channel</span>
+              <span>Add a workspace</span>
             </Item>
           )}
         </Section>

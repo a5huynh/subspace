@@ -1,8 +1,8 @@
-// @mention helpers for the channel composer and post rendering. Handles
+// @mention helpers for the workspace composer and post rendering. Handles
 // match the server: ASCII letters, digits, `-` and `_`, after a non-word
 // character (so emails don't count).
 
-/** The operator's handle in channels. */
+/** The operator's handle in workspaces. */
 export const OPERATOR_HANDLE = 'you'
 
 export interface MentionQuery {

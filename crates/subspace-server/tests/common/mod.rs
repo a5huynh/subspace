@@ -156,7 +156,7 @@ pub fn last_user_text(request: &CompletionRequest) -> String {
         .unwrap_or_default()
 }
 
-/// Whether a request is a channel routing call (not a worker turn).
+/// Whether a request is a workspace routing call (not a worker turn).
 pub fn is_router(request: &CompletionRequest) -> bool {
     request
         .system_prompt
@@ -164,17 +164,17 @@ pub fn is_router(request: &CompletionRequest) -> bool {
         .is_some_and(|p| p.starts_with("You route messages"))
 }
 
-/// Wait until `channel` has at least `posts` posts, no routing is pending,
+/// Wait until `workspace` has at least `posts` posts, no routing is pending,
 /// and every worker is idle.
-pub async fn settle(manager: &WorkerManager, channel: &str, posts: usize) {
-    let hub = manager.channels().unwrap();
+pub async fn settle(manager: &WorkerManager, workspace: &str, posts: usize) {
+    let hub = manager.workspaces().unwrap();
     tokio::time::timeout(Duration::from_secs(5), async {
         loop {
-            let all = hub.posts(channel).await.unwrap();
+            let all = hub.posts(workspace).await.unwrap();
             let count = all.len();
             let routed = all
                 .iter()
-                .all(|p| p.routing != subspace_server::channel::Routing::Pending);
+                .all(|p| p.routing != subspace_server::workspace::Routing::Pending);
             let idle = manager
                 .list()
                 .iter()
@@ -186,7 +186,7 @@ pub async fn settle(manager: &WorkerManager, channel: &str, posts: usize) {
                     .list()
                     .iter()
                     .all(|w| w.status == WorkerStatus::Idle)
-                    && hub.posts(channel).await.unwrap().len() == count
+                    && hub.posts(workspace).await.unwrap().len() == count
                 {
                     return;
                 }
@@ -195,7 +195,7 @@ pub async fn settle(manager: &WorkerManager, channel: &str, posts: usize) {
         }
     })
     .await
-    .expect("timed out waiting for the channel to settle");
+    .expect("timed out waiting for the workspace to settle");
 }
 
 /// Holds every completion until [`GatedProvider::release`] is called, so a

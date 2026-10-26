@@ -12,14 +12,14 @@ use anyhow::Result;
 use ts_rs::{Config, TS};
 
 use crate::api::{
-    AddMember, ChannelDetail, ChannelStreamMessage, CreateChannel, CreatePost, CreateWorker,
-    ErrorBody, Health, PromptRequest, StreamMessage, UpdateChannel, UpdateWorker, WorkerDetail,
-    WorkspaceDetail,
+    AddMember, CreatePost, CreateWorker, CreateWorkspace, ErrorBody, Health, PromptRequest,
+    StreamMessage, TeamDetail, UpdateWorker, UpdateWorkspace, WorkerDetail, WorkspaceDetail,
+    WorkspaceStreamMessage,
 };
-use crate::channel::Workspace;
 use crate::event::ServerEvent;
 use crate::manager::{History, WorkerSummary};
 use crate::worker::WorkerConfig;
+use crate::workspace::Team;
 
 /// Where the console expects the generated bindings, relative to the repo root.
 pub const CONSOLE_BINDINGS_DIR: &str = "console/src/api/generated";
@@ -39,13 +39,13 @@ pub fn export_ts_bindings(dir: &Path) -> Result<()> {
     Health::export_all(&cfg)?;
     ErrorBody::export_all(&cfg)?;
     StreamMessage::export_all(&cfg)?;
-    Workspace::export_all(&cfg)?;
+    Team::export_all(&cfg)?;
+    TeamDetail::export_all(&cfg)?;
     WorkspaceDetail::export_all(&cfg)?;
-    ChannelDetail::export_all(&cfg)?;
     AddMember::export_all(&cfg)?;
-    CreateChannel::export_all(&cfg)?;
-    UpdateChannel::export_all(&cfg)?;
+    CreateWorkspace::export_all(&cfg)?;
+    UpdateWorkspace::export_all(&cfg)?;
     CreatePost::export_all(&cfg)?;
-    ChannelStreamMessage::export_all(&cfg)?;
+    WorkspaceStreamMessage::export_all(&cfg)?;
     Ok(())
 }

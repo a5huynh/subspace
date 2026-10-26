@@ -1,19 +1,19 @@
-//! Channel model: text helpers and storage.
+//! Workspace model: text helpers and storage.
 
 use chrono::Utc;
 use subspace::types::{Message, new_id};
-use subspace_server::channel::{
-    Author, Channel, ChannelMember, ChannelPost, Conversation, DEFAULT_WORKSPACE, Routing,
-    handle_for, parse_mentions, render_turn,
-};
 use subspace_server::event::{Notice, NoticeLevel};
 use subspace_server::store::SqliteStore;
+use subspace_server::workspace::{
+    Author, Conversation, DEFAULT_TEAM, Routing, Workspace, WorkspaceMember, WorkspacePost,
+    handle_for, parse_mentions, render_turn,
+};
 
-fn post(channel: &str, author: Author, name: &str, text: &str) -> ChannelPost {
+fn post(workspace: &str, author: Author, name: &str, text: &str) -> WorkspacePost {
     let id = new_id();
-    ChannelPost {
+    WorkspacePost {
         id: id.clone(),
-        channel_id: channel.to_string(),
+        workspace_id: workspace.to_string(),
         seq: 0,
         author,
         author_name: name.to_string(),
@@ -46,14 +46,14 @@ fn mentions_are_distinct_lowercase_handles_not_emails() {
 
 #[test]
 fn a_turn_lists_members_identity_and_unseen_posts() {
-    let channel = Channel {
+    let workspace = Workspace {
         id: "c1".into(),
-        workspace_id: "w".into(),
+        team_id: "w".into(),
         name: "launch".into(),
         topic: "Ship v2".into(),
         created_at: Utc::now(),
     };
-    let member = |id: &str, name: &str, description: &str| ChannelMember {
+    let member = |id: &str, name: &str, description: &str| WorkspaceMember {
         worker_id: id.into(),
         name: name.into(),
         handle: handle_for(name),
@@ -72,8 +72,8 @@ fn a_turn_lists_members_identity_and_unseen_posts() {
             "Three things.",
         ),
     ];
-    let text = render_turn("General", &channel, &members, &members[1], &posts, 2);
-    assert!(text.contains("<channel name=\"launch\" workspace=\"General\">"));
+    let text = render_turn("General", &workspace, &members, &members[1], &posts, 2);
+    assert!(text.contains("<workspace name=\"launch\" team=\"General\">"));
     assert!(text.contains("Topic: Ship v2"));
     assert!(text.contains(
         "@you (human operator), @researcher (Researcher: finds facts), @writer (Writer)"
@@ -84,44 +84,44 @@ fn a_turn_lists_members_identity_and_unseen_posts() {
 }
 
 #[tokio::test]
-async fn default_workspace_is_seeded_once() {
+async fn default_team_is_seeded_once() {
     let store = SqliteStore::connect("sqlite::memory:").await.unwrap();
-    let ws = store.ensure_default_workspace().await.unwrap();
-    assert_eq!(ws.name, DEFAULT_WORKSPACE);
-    assert_eq!(store.ensure_default_workspace().await.unwrap(), ws);
-    assert_eq!(store.list_workspaces().await.unwrap(), vec![ws]);
+    let ws = store.ensure_default_team().await.unwrap();
+    assert_eq!(ws.name, DEFAULT_TEAM);
+    assert_eq!(store.ensure_default_team().await.unwrap(), ws);
+    assert_eq!(store.list_teams().await.unwrap(), vec![ws]);
 }
 
 #[tokio::test]
-async fn channel_names_are_unique_per_workspace() {
+async fn workspace_names_are_unique_per_team() {
     let store = SqliteStore::connect("sqlite::memory:").await.unwrap();
     let a = store
-        .create_channel("ws1", "launch", "")
+        .create_workspace("ws1", "launch", "")
         .await
         .unwrap()
         .unwrap();
     assert!(
         store
-            .create_channel("ws1", "launch", "")
+            .create_workspace("ws1", "launch", "")
             .await
             .unwrap()
             .is_none()
     );
     assert!(
         store
-            .create_channel("ws2", "launch", "")
+            .create_workspace("ws2", "launch", "")
             .await
             .unwrap()
             .is_some()
     );
     let b = store
-        .create_channel("ws1", "alpha", "")
+        .create_workspace("ws1", "alpha", "")
         .await
         .unwrap()
         .unwrap();
 
     let names: Vec<_> = store
-        .list_channels("ws1")
+        .list_workspaces("ws1")
         .await
         .unwrap()
         .into_iter()
@@ -130,50 +130,50 @@ async fn channel_names_are_unique_per_workspace() {
     assert_eq!(names, ["alpha", "launch"]);
 
     assert!(
-        !store.update_channel(&b.id, "launch", "").await.unwrap(),
+        !store.update_workspace(&b.id, "launch", "").await.unwrap(),
         "name taken"
     );
     assert!(
         store
-            .update_channel(&a.id, "launch-v2", "Topic")
+            .update_workspace(&a.id, "launch-v2", "Topic")
             .await
             .unwrap()
     );
-    let a = store.get_channel(&a.id).await.unwrap().unwrap();
+    let a = store.get_workspace(&a.id).await.unwrap().unwrap();
     assert_eq!((a.name.as_str(), a.topic.as_str()), ("launch-v2", "Topic"));
 }
 
 #[tokio::test]
-async fn leaving_a_workspace_leaves_its_channels() {
+async fn leaving_a_team_leaves_its_workspaces() {
     let store = SqliteStore::connect("sqlite::memory:").await.unwrap();
-    let ws = store.ensure_default_workspace().await.unwrap();
+    let ws = store.ensure_default_team().await.unwrap();
     let ch = store
-        .create_channel(&ws.id, "launch", "")
+        .create_workspace(&ws.id, "launch", "")
         .await
         .unwrap()
         .unwrap();
     let other = store
-        .create_channel("elsewhere", "x", "")
+        .create_workspace("elsewhere", "x", "")
         .await
         .unwrap()
         .unwrap();
-    store.add_workspace_member(&ws.id, "w1").await.unwrap();
-    store.add_workspace_member(&ws.id, "w1").await.unwrap();
-    store.add_channel_member(&ch.id, "w1").await.unwrap();
-    store.add_channel_member(&other.id, "w1").await.unwrap();
-    assert_eq!(store.workspace_members(&ws.id).await.unwrap(), ["w1"]);
+    store.add_team_member(&ws.id, "w1").await.unwrap();
+    store.add_team_member(&ws.id, "w1").await.unwrap();
+    store.add_workspace_member(&ch.id, "w1").await.unwrap();
+    store.add_workspace_member(&other.id, "w1").await.unwrap();
+    assert_eq!(store.team_members(&ws.id).await.unwrap(), ["w1"]);
     assert_eq!(
-        store.worker_workspaces("w1").await.unwrap(),
+        store.worker_teams("w1").await.unwrap(),
         std::slice::from_ref(&ws.id)
     );
 
-    store.remove_workspace_member(&ws.id, "w1").await.unwrap();
-    assert!(store.workspace_members(&ws.id).await.unwrap().is_empty());
-    assert!(store.channel_members(&ch.id).await.unwrap().is_empty());
+    store.remove_team_member(&ws.id, "w1").await.unwrap();
+    assert!(store.team_members(&ws.id).await.unwrap().is_empty());
+    assert!(store.workspace_members(&ch.id).await.unwrap().is_empty());
     assert_eq!(
-        store.channel_members(&other.id).await.unwrap(),
+        store.workspace_members(&other.id).await.unwrap(),
         ["w1"],
-        "other workspace untouched"
+        "other team untouched"
     );
 }
 
@@ -181,11 +181,11 @@ async fn leaving_a_workspace_leaves_its_channels() {
 async fn posts_roundtrip_and_last_seen_only_moves_forward() {
     let store = SqliteStore::connect("sqlite::memory:").await.unwrap();
     let ch = store
-        .create_channel("ws", "launch", "")
+        .create_workspace("ws", "launch", "")
         .await
         .unwrap()
         .unwrap();
-    store.add_channel_member(&ch.id, "w1").await.unwrap();
+    store.add_workspace_member(&ch.id, "w1").await.unwrap();
 
     let mut first = post(&ch.id, Author::Operator, "You", "@writer hi");
     first.mentions = vec!["w1".into()];
@@ -197,7 +197,7 @@ async fn posts_roundtrip_and_last_seen_only_moves_forward() {
     assert!(reply.seq > first.seq);
 
     // Timestamps go through RFC 3339 text; compare everything else exactly.
-    let strip = |mut p: ChannelPost| {
+    let strip = |mut p: WorkspacePost| {
         p.timestamp = chrono::DateTime::UNIX_EPOCH;
         p
     };
@@ -222,25 +222,29 @@ async fn posts_roundtrip_and_last_seen_only_moves_forward() {
 }
 
 #[tokio::test]
-async fn sessions_are_separate_per_conversation_and_deleting_a_channel_keeps_dms() {
+async fn sessions_are_separate_per_conversation_and_deleting_a_workspace_keeps_dms() {
     let store = SqliteStore::connect("sqlite::memory:").await.unwrap();
     let ch = store
-        .create_channel("ws", "launch", "")
+        .create_workspace("ws", "launch", "")
         .await
         .unwrap()
         .unwrap();
-    let in_channel = Conversation::Channel(ch.id.clone());
-    store.add_channel_member(&ch.id, "w1").await.unwrap();
+    let in_workspace = Conversation::Workspace(ch.id.clone());
+    store.add_workspace_member(&ch.id, "w1").await.unwrap();
     store
         .append_messages("w1", &[Message::user("dm")])
         .await
         .unwrap();
     store
-        .append_session("w1", &in_channel, &[Message::user("channel")])
+        .append_session("w1", &in_workspace, &[Message::user("workspace")])
         .await
         .unwrap();
     store
-        .append_conversation_notice("w1", &in_channel, &Notice::new(NoticeLevel::Error, "boom"))
+        .append_conversation_notice(
+            "w1",
+            &in_workspace,
+            &Notice::new(NoticeLevel::Error, "boom"),
+        )
         .await
         .unwrap();
     store
@@ -250,36 +254,36 @@ async fn sessions_are_separate_per_conversation_and_deleting_a_channel_keeps_dms
 
     assert_eq!(store.load_history("w1").await.unwrap()[0].text(), "dm");
     assert_eq!(
-        store.load_session("w1", &in_channel).await.unwrap()[0].text(),
-        "channel"
+        store.load_session("w1", &in_workspace).await.unwrap()[0].text(),
+        "workspace"
     );
     assert!(
         store.load_notices("w1").await.unwrap().is_empty(),
-        "channel notices aren't DM notices"
+        "workspace notices aren't DM notices"
     );
     assert_eq!(
         store
-            .load_conversation_notices(&in_channel)
+            .load_conversation_notices(&in_workspace)
             .await
             .unwrap()
             .len(),
         1
     );
 
-    store.delete_channel(&ch.id).await.unwrap();
-    assert!(store.get_channel(&ch.id).await.unwrap().is_none());
+    store.delete_workspace(&ch.id).await.unwrap();
+    assert!(store.get_workspace(&ch.id).await.unwrap().is_none());
     assert!(store.list_posts(&ch.id).await.unwrap().is_empty());
-    assert!(store.channel_members(&ch.id).await.unwrap().is_empty());
+    assert!(store.workspace_members(&ch.id).await.unwrap().is_empty());
     assert!(
         store
-            .load_session("w1", &in_channel)
+            .load_session("w1", &in_workspace)
             .await
             .unwrap()
             .is_empty()
     );
     assert!(
         store
-            .load_conversation_notices(&in_channel)
+            .load_conversation_notices(&in_workspace)
             .await
             .unwrap()
             .is_empty()
@@ -290,22 +294,22 @@ async fn sessions_are_separate_per_conversation_and_deleting_a_channel_keeps_dms
 #[tokio::test]
 async fn deleting_a_worker_drops_its_memberships_but_keeps_its_posts() {
     let store = SqliteStore::connect("sqlite::memory:").await.unwrap();
-    let ws = store.ensure_default_workspace().await.unwrap();
+    let ws = store.ensure_default_team().await.unwrap();
     let ch = store
-        .create_channel(&ws.id, "launch", "")
+        .create_workspace(&ws.id, "launch", "")
         .await
         .unwrap()
         .unwrap();
-    store.add_workspace_member(&ws.id, "w1").await.unwrap();
-    store.add_channel_member(&ch.id, "w1").await.unwrap();
+    store.add_team_member(&ws.id, "w1").await.unwrap();
+    store.add_workspace_member(&ch.id, "w1").await.unwrap();
     store
         .append_post(&post(&ch.id, Author::Worker("w1".into()), "Writer", "bye"))
         .await
         .unwrap();
 
     store.delete_worker("w1").await.unwrap();
-    assert!(store.workspace_members(&ws.id).await.unwrap().is_empty());
-    assert!(store.channel_members(&ch.id).await.unwrap().is_empty());
+    assert!(store.team_members(&ws.id).await.unwrap().is_empty());
+    assert!(store.workspace_members(&ch.id).await.unwrap().is_empty());
     assert_eq!(
         store.list_posts(&ch.id).await.unwrap()[0].author_name,
         "Writer"

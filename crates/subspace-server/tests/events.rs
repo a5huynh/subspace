@@ -278,16 +278,16 @@ async fn run_errors_are_persisted_as_notices_but_never_sent_to_the_model() {
 }
 
 #[test]
-fn channel_cursor_points_before_the_earliest_active_run() {
-    use subspace_server::event::{ChannelEventKind, ChannelLog};
+fn workspace_cursor_points_before_the_earliest_active_run() {
+    use subspace_server::event::{WorkspaceEventKind, WorkspaceLog};
     let (bus, _) = tokio::sync::broadcast::channel(16);
-    let log = ChannelLog::new("c1", bus);
-    let status = |worker: &str, s: WorkerStatus| ChannelEventKind::Worker {
+    let log = WorkspaceLog::new("c1", bus);
+    let status = |worker: &str, s: WorkerStatus| WorkspaceEventKind::Worker {
         worker_id: worker.into(),
         event: WorkerEvent::StatusChanged(s),
     };
 
-    log.emit(ChannelEventKind::Changed); // seq 1
+    log.emit(WorkspaceEventKind::Changed); // seq 1
     log.emit(status("a", WorkerStatus::Running)); // seq 2: a's run starts after 1
     log.emit(status("b", WorkerStatus::Running)); // seq 3: b's run starts after 2
     assert_eq!(log.cursor(), 1);

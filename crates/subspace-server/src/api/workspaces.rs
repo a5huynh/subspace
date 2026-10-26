@@ -1,4 +1,4 @@
-//! `/api/workspaces` and `/api/channels` REST handlers.
+//! `/api/teams` and `/api/workspaces` REST handlers.
 
 use axum::extract::rejection::JsonRejection;
 use axum::extract::{Path, State};
@@ -10,178 +10,183 @@ use ts_rs::TS;
 
 use super::{ApiResult, AppState};
 use crate::WorkerId;
-use crate::channel::{Channel, ChannelMember, ChannelPost, Workspace};
 use crate::event::Notice;
+use crate::workspace::{Team, Workspace, WorkspaceMember, WorkspacePost};
 
 pub(super) fn routes() -> Router<AppState> {
     Router::new()
-        .route("/api/workspaces", get(list_workspaces))
-        .route("/api/workspaces/{id}", get(workspace))
-        .route("/api/workspaces/{id}/members", post(add_workspace_member))
+        .route("/api/teams", get(list_teams))
+        .route("/api/teams/{id}", get(team))
+        .route("/api/teams/{id}/members", post(add_team_member))
+        .route(
+            "/api/teams/{id}/members/{worker}",
+            delete(remove_team_member),
+        )
+        .route("/api/teams/{id}/workspaces", post(create_workspace))
+        .route(
+            "/api/workspaces/{id}",
+            get(workspace)
+                .patch(update_workspace)
+                .delete(delete_workspace),
+        )
+        .route("/api/workspaces/{id}/members", post(add_member))
         .route(
             "/api/workspaces/{id}/members/{worker}",
-            delete(remove_workspace_member),
+            delete(remove_member),
         )
-        .route("/api/workspaces/{id}/channels", post(create_channel))
-        .route(
-            "/api/channels/{id}",
-            get(channel).patch(update_channel).delete(delete_channel),
-        )
-        .route("/api/channels/{id}/members", post(add_member))
-        .route("/api/channels/{id}/members/{worker}", delete(remove_member))
-        .route("/api/channels/{id}/posts", post(create_post))
+        .route("/api/workspaces/{id}/posts", post(create_post))
 }
 
-/// `GET /api/workspaces/{id}` response.
+/// `GET /api/teams/{id}` response.
 #[derive(Debug, Clone, Serialize, TS)]
-pub struct WorkspaceDetail {
-    pub workspace: Workspace,
+pub struct TeamDetail {
+    pub team: Team,
     /// Member worker ids, in join order.
     pub members: Vec<WorkerId>,
-    /// Channels, by name.
-    pub channels: Vec<Channel>,
+    /// Workspaces, by name.
+    pub workspaces: Vec<Workspace>,
 }
 
-/// `GET /api/channels/{id}` response: everything to render a channel, plus
+/// `GET /api/workspaces/{id}` response: everything to render a workspace, plus
 /// the stream position to resume from.
 #[derive(Debug, Clone, Serialize, TS)]
-pub struct ChannelDetail {
+pub struct WorkspaceDetail {
     /// The server's boot epoch (see `History.epoch`).
     pub epoch: String,
-    /// Resume the channel stream with `since = cursor`. Taken before reading
+    /// Resume the workspace stream with `since = cursor`. Taken before reading
     /// posts, so replayed events may repeat them; clients merge by id.
     pub cursor: u64,
-    pub channel: Channel,
-    pub members: Vec<ChannelMember>,
-    pub posts: Vec<ChannelPost>,
+    pub workspace: Workspace,
+    pub members: Vec<WorkspaceMember>,
+    pub posts: Vec<WorkspacePost>,
     pub notices: Vec<Notice>,
 }
 
-/// Body for adding a worker to a workspace or channel.
+/// Body for adding a worker to a team or workspace.
 #[derive(Debug, Clone, Deserialize, TS)]
 pub struct AddMember {
     pub worker_id: WorkerId,
 }
 
-/// `POST /api/workspaces/{id}/channels` body.
+/// `POST /api/teams/{id}/workspaces` body.
 #[derive(Debug, Clone, Deserialize, TS)]
 #[ts(optional_fields)]
-pub struct CreateChannel {
+pub struct CreateWorkspace {
     pub name: String,
     pub topic: Option<String>,
-    /// Initial worker members (must belong to the workspace).
+    /// Initial worker members (must belong to the team).
     pub members: Option<Vec<WorkerId>>,
 }
 
-/// `PATCH /api/channels/{id}` body. Only provided fields change.
+/// `PATCH /api/workspaces/{id}` body. Only provided fields change.
 #[derive(Debug, Clone, Default, Deserialize, TS)]
 #[ts(optional_fields)]
-pub struct UpdateChannel {
+pub struct UpdateWorkspace {
     pub name: Option<String>,
     pub topic: Option<String>,
 }
 
-/// `POST /api/channels/{id}/posts` body: post as the operator.
+/// `POST /api/workspaces/{id}/posts` body: post as the operator.
 #[derive(Debug, Clone, Deserialize, TS)]
 pub struct CreatePost {
     pub text: String,
 }
 
-async fn list_workspaces(State(manager): State<AppState>) -> ApiResult<Json<Vec<Workspace>>> {
-    Ok(Json(manager.channels()?.workspaces().await?))
+async fn list_teams(State(manager): State<AppState>) -> ApiResult<Json<Vec<Team>>> {
+    Ok(Json(manager.workspaces()?.teams().await?))
 }
 
-async fn workspace(
+async fn team(
     State(manager): State<AppState>,
     Path(id): Path<String>,
-) -> ApiResult<Json<WorkspaceDetail>> {
-    let hub = manager.channels()?;
-    Ok(Json(WorkspaceDetail {
-        workspace: hub.workspace(&id).await?,
-        members: hub.workspace_members(&id).await?,
-        channels: hub.channels(&id).await?,
+) -> ApiResult<Json<TeamDetail>> {
+    let hub = manager.workspaces()?;
+    Ok(Json(TeamDetail {
+        team: hub.team(&id).await?,
+        members: hub.team_members(&id).await?,
+        workspaces: hub.workspaces(&id).await?,
     }))
 }
 
-async fn add_workspace_member(
+async fn add_team_member(
     State(manager): State<AppState>,
     Path(id): Path<String>,
     body: Result<Json<AddMember>, JsonRejection>,
 ) -> ApiResult<StatusCode> {
     let Json(body) = body?;
     manager
-        .channels()?
-        .add_workspace_member(&id, &body.worker_id)
+        .workspaces()?
+        .add_team_member(&id, &body.worker_id)
         .await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
-async fn remove_workspace_member(
+async fn remove_team_member(
     State(manager): State<AppState>,
     Path((id, worker)): Path<(String, WorkerId)>,
 ) -> ApiResult<StatusCode> {
     manager
-        .channels()?
-        .remove_workspace_member(&id, &worker)
+        .workspaces()?
+        .remove_team_member(&id, &worker)
         .await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
-async fn create_channel(
+async fn create_workspace(
     State(manager): State<AppState>,
     Path(id): Path<String>,
-    body: Result<Json<CreateChannel>, JsonRejection>,
-) -> ApiResult<(StatusCode, Json<Channel>)> {
+    body: Result<Json<CreateWorkspace>, JsonRejection>,
+) -> ApiResult<(StatusCode, Json<Workspace>)> {
     let Json(body) = body?;
-    let channel = manager
-        .channels()?
-        .create_channel(
+    let workspace = manager
+        .workspaces()?
+        .create_workspace(
             &id,
             &body.name,
             body.topic.as_deref().unwrap_or(""),
             &body.members.unwrap_or_default(),
         )
         .await?;
-    Ok((StatusCode::CREATED, Json(channel)))
+    Ok((StatusCode::CREATED, Json(workspace)))
 }
 
-async fn channel(
+async fn workspace(
     State(manager): State<AppState>,
     Path(id): Path<String>,
-) -> ApiResult<Json<ChannelDetail>> {
-    let hub = manager.channels()?;
-    let channel = hub.channel(&id).await?;
+) -> ApiResult<Json<WorkspaceDetail>> {
+    let hub = manager.workspaces()?;
+    let workspace = hub.workspace(&id).await?;
     // Cursor first: anything that lands in between is replayed (and
     // deduplicated by id) rather than lost.
     let cursor = hub.log(&id).cursor();
-    Ok(Json(ChannelDetail {
+    Ok(Json(WorkspaceDetail {
         epoch: manager.epoch().to_string(),
         cursor,
         members: hub.members(&id).await?,
         posts: hub.posts(&id).await?,
         notices: hub.notices(&id).await?,
-        channel,
+        workspace,
     }))
 }
 
-async fn update_channel(
+async fn update_workspace(
     State(manager): State<AppState>,
     Path(id): Path<String>,
-    body: Result<Json<UpdateChannel>, JsonRejection>,
-) -> ApiResult<Json<Channel>> {
+    body: Result<Json<UpdateWorkspace>, JsonRejection>,
+) -> ApiResult<Json<Workspace>> {
     let Json(body) = body?;
-    let channel = manager
-        .channels()?
-        .update_channel(&id, body.name.as_deref(), body.topic.as_deref())
+    let workspace = manager
+        .workspaces()?
+        .update_workspace(&id, body.name.as_deref(), body.topic.as_deref())
         .await?;
-    Ok(Json(channel))
+    Ok(Json(workspace))
 }
 
-async fn delete_channel(
+async fn delete_workspace(
     State(manager): State<AppState>,
     Path(id): Path<String>,
 ) -> ApiResult<StatusCode> {
-    manager.channels()?.delete_channel(&id).await?;
+    manager.workspaces()?.delete_workspace(&id).await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -191,7 +196,10 @@ async fn add_member(
     body: Result<Json<AddMember>, JsonRejection>,
 ) -> ApiResult<StatusCode> {
     let Json(body) = body?;
-    manager.channels()?.add_member(&id, &body.worker_id).await?;
+    manager
+        .workspaces()?
+        .add_member(&id, &body.worker_id)
+        .await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -199,7 +207,7 @@ async fn remove_member(
     State(manager): State<AppState>,
     Path((id, worker)): Path<(String, WorkerId)>,
 ) -> ApiResult<StatusCode> {
-    manager.channels()?.remove_member(&id, &worker).await?;
+    manager.workspaces()?.remove_member(&id, &worker).await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -207,8 +215,8 @@ async fn create_post(
     State(manager): State<AppState>,
     Path(id): Path<String>,
     body: Result<Json<CreatePost>, JsonRejection>,
-) -> ApiResult<(StatusCode, Json<ChannelPost>)> {
+) -> ApiResult<(StatusCode, Json<WorkspacePost>)> {
     let Json(body) = body?;
-    let post = manager.channels()?.post_operator(&id, &body.text).await?;
+    let post = manager.workspaces()?.post_operator(&id, &body.text).await?;
     Ok((StatusCode::CREATED, Json(post)))
 }

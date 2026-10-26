@@ -1,4 +1,4 @@
-//! Workspace/channel REST and the channel WebSocket, against a real server.
+//! Team/workspace REST and the workspace WebSocket, against a real server.
 
 mod common;
 
@@ -39,7 +39,7 @@ async fn server() -> Server {
             _ => "Checked.".into(),
         }
     }));
-    let data = std::env::temp_dir().join(format!("subspace_api_channels_{}", new_id()));
+    let data = std::env::temp_dir().join(format!("subspace_api_workspaces_{}", new_id()));
     fs::create_dir_all(&data).unwrap();
     let store = Arc::new(SqliteStore::connect("sqlite::memory:").await.unwrap());
     let manager = Arc::new(WorkerManager::with_persistence(
@@ -84,13 +84,13 @@ impl Server {
     }
 
     async fn general(&self) -> String {
-        let (_, body) = self.get("/api/workspaces").await;
+        let (_, body) = self.get("/api/teams").await;
         body[0]["id"].as_str().unwrap().to_string()
     }
 
-    async fn connect(&self, channel: &str, query: &str) -> Ws {
+    async fn connect(&self, workspace: &str, query: &str) -> Ws {
         let url = format!(
-            "{}/api/channels/{channel}/stream{query}",
+            "{}/api/workspaces/{workspace}/stream{query}",
             self.base.replace("http", "ws")
         );
         connect_async(url).await.expect("handshake").0
@@ -140,39 +140,42 @@ async fn events_until_posts(ws: &mut Ws, count: usize) -> Vec<Value> {
 }
 
 #[tokio::test]
-async fn workspace_and_channel_crud() {
+async fn team_and_workspace_crud() {
     let s = server().await;
     let ws = s.general().await;
     let alpha = s.worker("Alpha", "lead").await;
 
-    let (status, detail) = s.get(&format!("/api/workspaces/{ws}")).await;
+    let (status, detail) = s.get(&format!("/api/teams/{ws}")).await;
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(detail["workspace"]["name"], "General");
+    assert_eq!(detail["team"]["name"], "General");
     assert_eq!(detail["members"], json!([alpha]));
-    assert_eq!(detail["channels"], json!([]));
+    assert_eq!(detail["workspaces"], json!([]));
 
-    let (status, channel) = s
+    let (status, workspace) = s
         .send(
             "POST",
-            &format!("/api/workspaces/{ws}/channels"),
-            json!({"name": "Launch Plan", "topic": "ship it", "members": [alpha]}),
+            &format!("/api/teams/{ws}/workspaces"),
+            json!({"name": "  Launch   Plan ", "topic": "ship it", "members": [alpha]}),
         )
         .await;
-    assert_eq!(status, StatusCode::CREATED, "{channel}");
-    assert_eq!(channel["name"], "launch-plan");
-    let id = channel["id"].as_str().unwrap();
+    assert_eq!(status, StatusCode::CREATED, "{workspace}");
+    assert_eq!(
+        workspace["name"], "Launch Plan",
+        "kept as typed, whitespace tidied"
+    );
+    let id = workspace["id"].as_str().unwrap();
 
     let (status, body) = s
         .send(
             "POST",
-            &format!("/api/workspaces/{ws}/channels"),
-            json!({"name": "launch plan"}),
+            &format!("/api/teams/{ws}/workspaces"),
+            json!({"name": "Launch Plan"}),
         )
         .await;
     assert_eq!(status, StatusCode::CONFLICT, "{body}");
 
-    let (_, detail) = s.get(&format!("/api/channels/{id}")).await;
-    assert_eq!(detail["channel"]["topic"], "ship it");
+    let (_, detail) = s.get(&format!("/api/workspaces/{id}")).await;
+    assert_eq!(detail["workspace"]["topic"], "ship it");
     assert_eq!(detail["members"][0]["handle"], "alpha");
     assert_eq!(detail["posts"], json!([]));
     assert!(detail["epoch"].is_string() && detail["cursor"].is_number());
@@ -180,20 +183,20 @@ async fn workspace_and_channel_crud() {
     let (status, updated) = s
         .send(
             "PATCH",
-            &format!("/api/channels/{id}"),
+            &format!("/api/workspaces/{id}"),
             json!({"topic": "v2"}),
         )
         .await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(
         (updated["name"].clone(), updated["topic"].clone()),
-        (json!("launch-plan"), json!("v2"))
+        (json!("Launch Plan"), json!("v2"))
     );
 
     let (status, _) = s
         .send(
             "DELETE",
-            &format!("/api/channels/{id}/members/{alpha}"),
+            &format!("/api/workspaces/{id}/members/{alpha}"),
             Value::Null,
         )
         .await;
@@ -201,19 +204,24 @@ async fn workspace_and_channel_crud() {
     let (status, _) = s
         .send(
             "POST",
-            &format!("/api/channels/{id}/members"),
+            &format!("/api/workspaces/{id}/members"),
             json!({"worker_id": alpha}),
         )
         .await;
     assert_eq!(status, StatusCode::NO_CONTENT);
 
     let (status, _) = s
-        .send("DELETE", &format!("/api/channels/{id}"), Value::Null)
+        .send("DELETE", &format!("/api/workspaces/{id}"), Value::Null)
         .await;
     assert_eq!(status, StatusCode::NO_CONTENT);
-    let (status, body) = s.get(&format!("/api/channels/{id}")).await;
+    let (status, body) = s.get(&format!("/api/workspaces/{id}")).await;
     assert_eq!(status, StatusCode::NOT_FOUND);
-    assert!(body["error"].as_str().unwrap().contains("no such channel"));
+    assert!(
+        body["error"]
+            .as_str()
+            .unwrap()
+            .contains("no such workspace")
+    );
 }
 
 #[tokio::test]
@@ -221,49 +229,49 @@ async fn errors_are_json_with_the_right_status() {
     let s = server().await;
     let ws = s.general().await;
     let alpha = s.worker("Alpha", "lead").await;
-    let (_, channel) = s
+    let (_, workspace) = s
         .send(
             "POST",
-            &format!("/api/workspaces/{ws}/channels"),
+            &format!("/api/teams/{ws}/workspaces"),
             json!({"name": "c"}),
         )
         .await;
-    let id = channel["id"].as_str().unwrap();
+    let id = workspace["id"].as_str().unwrap();
 
     let cases = [
         (
             "GET",
-            "/api/workspaces/nope".to_string(),
+            "/api/teams/nope".to_string(),
             Value::Null,
             StatusCode::NOT_FOUND,
         ),
         (
             "POST",
-            format!("/api/channels/{id}/posts"),
+            format!("/api/workspaces/{id}/posts"),
             json!({"text": "  "}),
             StatusCode::BAD_REQUEST,
         ),
         (
             "POST",
-            format!("/api/channels/{id}/posts"),
+            format!("/api/workspaces/{id}/posts"),
             json!({}),
             StatusCode::BAD_REQUEST,
         ),
         (
             "POST",
-            format!("/api/channels/{id}/members"),
+            format!("/api/workspaces/{id}/members"),
             json!({"worker_id": "ghost"}),
             StatusCode::NOT_FOUND,
         ),
         (
             "POST",
-            format!("/api/workspaces/{ws}/channels"),
-            json!({"name": "!!"}),
+            format!("/api/teams/{ws}/workspaces"),
+            json!({"name": "   "}),
             StatusCode::BAD_REQUEST,
         ),
         (
             "POST",
-            "/api/channels/nope/posts".to_string(),
+            "/api/workspaces/nope/posts".to_string(),
             json!({"text": "hi"}),
             StatusCode::NOT_FOUND,
         ),
@@ -278,11 +286,11 @@ async fn errors_are_json_with_the_right_status() {
         assert!(body["error"].is_string(), "{method} {path}: {body}");
     }
 
-    // A worker removed from the workspace can't join its channels.
+    // A worker removed from the team can't join its workspaces.
     let (status, _) = s
         .send(
             "DELETE",
-            &format!("/api/workspaces/{ws}/members/{alpha}"),
+            &format!("/api/teams/{ws}/members/{alpha}"),
             Value::Null,
         )
         .await;
@@ -290,7 +298,7 @@ async fn errors_are_json_with_the_right_status() {
     let (status, body) = s
         .send(
             "POST",
-            &format!("/api/channels/{id}/members"),
+            &format!("/api/workspaces/{id}/members"),
             json!({"worker_id": alpha}),
         )
         .await;
@@ -303,26 +311,26 @@ async fn posting_streams_the_conversation_and_resuming_replays_it() {
     let ws = s.general().await;
     let lead = s.worker("Lead", "lead").await;
     let helper = s.worker("Helper", "helper").await;
-    let (_, channel) = s
+    let (_, workspace) = s
         .send(
             "POST",
-            &format!("/api/workspaces/{ws}/channels"),
+            &format!("/api/teams/{ws}/workspaces"),
             json!({"name": "work", "members": [lead, helper]}),
         )
         .await;
-    let id = channel["id"].as_str().unwrap().to_string();
-    let (_, detail) = s.get(&format!("/api/channels/{id}")).await;
+    let id = workspace["id"].as_str().unwrap().to_string();
+    let (_, detail) = s.get(&format!("/api/workspaces/{id}")).await;
     let epoch = detail["epoch"].as_str().unwrap().to_string();
 
     let mut stream = s.connect(&id, "").await;
     let hello = next(&mut stream).await.unwrap();
     assert_eq!(hello["type"], "hello");
-    assert_eq!(hello["channel_id"], id);
+    assert_eq!(hello["workspace_id"], id);
 
     let (status, post) = s
         .send(
             "POST",
-            &format!("/api/channels/{id}/posts"),
+            &format!("/api/workspaces/{id}/posts"),
             json!({"text": "@lead go"}),
         )
         .await;
@@ -366,7 +374,7 @@ async fn posting_streams_the_conversation_and_resuming_replays_it() {
     assert_eq!(seqs(&replayed), seqs(&events));
 
     // History has the same posts.
-    let (_, detail) = s.get(&format!("/api/channels/{id}")).await;
+    let (_, detail) = s.get(&format!("/api/workspaces/{id}")).await;
     assert_eq!(detail["posts"].as_array().unwrap().len(), 3);
 
     // A stale epoch resyncs.
@@ -375,26 +383,29 @@ async fn posting_streams_the_conversation_and_resuming_replays_it() {
 }
 
 #[tokio::test]
-async fn deleting_a_channel_tells_its_stream() {
+async fn deleting_a_workspace_tells_its_stream() {
     let s = server().await;
     let ws = s.general().await;
-    let (_, channel) = s
+    let (_, workspace) = s
         .send(
             "POST",
-            &format!("/api/workspaces/{ws}/channels"),
+            &format!("/api/teams/{ws}/workspaces"),
             json!({"name": "tmp"}),
         )
         .await;
-    let id = channel["id"].as_str().unwrap().to_string();
+    let id = workspace["id"].as_str().unwrap().to_string();
     let mut stream = s.connect(&id, "").await;
     assert_eq!(next(&mut stream).await.unwrap()["type"], "hello");
 
-    s.send("DELETE", &format!("/api/channels/{id}"), Value::Null)
+    s.send("DELETE", &format!("/api/workspaces/{id}"), Value::Null)
         .await;
     let frame = next(&mut stream).await.unwrap();
     assert_eq!(frame["event"]["inner"]["type"], "deleted", "{frame}");
 
-    // Unknown channels fail the handshake.
-    let url = format!("{}/api/channels/{id}/stream", s.base.replace("http", "ws"));
+    // Unknown workspaces fail the handshake.
+    let url = format!(
+        "{}/api/workspaces/{id}/stream",
+        s.base.replace("http", "ws")
+    );
     assert!(connect_async(url).await.is_err());
 }

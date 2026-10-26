@@ -1,6 +1,6 @@
 import { useLayoutEffect, useRef, useState, type KeyboardEvent, type ReactNode } from 'react'
 
-import type { ChannelMember } from '../api/generated/ChannelMember'
+import type { WorkspaceMember } from '../api/generated/WorkspaceMember'
 import type { Notice } from '../api/generated/Notice'
 import type { WorkerStatus } from '../api/generated/WorkerStatus'
 import { avatarColor, dayLabel, formatFull, formatTime, initials, summarizeNotice } from '../chat/format'
@@ -44,6 +44,18 @@ export function Avatar({
         />
       )}
     </span>
+  )
+}
+
+/** A workspace: a shared space where workers collaborate on a piece of work. */
+export function WorkspaceIcon({ className = 'size-4' }: { className?: string }) {
+  return (
+    <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth="1.6" className={className} aria-hidden>
+      <rect x="3" y="3" width="6" height="6" rx="1.5" />
+      <rect x="11" y="3" width="6" height="6" rx="1.5" />
+      <rect x="3" y="11" width="6" height="6" rx="1.5" />
+      <rect x="11" y="11" width="6" height="6" rx="1.5" />
+    </svg>
   )
 }
 
@@ -156,7 +168,7 @@ export function EmptyState({ children }: { children: ReactNode }) {
   return <p className="m-auto max-w-md px-5 py-16 text-center text-muted">{children}</p>
 }
 
-/** The header bar shared by DMs and channels. */
+/** The header bar shared by DMs and workspaces. */
 export function ConversationHeader({
   title,
   subtitle,
@@ -201,7 +213,7 @@ export function Composer({
 }: {
   placeholder: string
   onSend: (text: string) => Promise<void>
-  members?: ChannelMember[]
+  members?: WorkspaceMember[]
 }) {
   const [text, setText] = useState('')
   const [caret, setCaret] = useState(0)

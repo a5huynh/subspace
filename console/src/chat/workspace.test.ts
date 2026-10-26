@@ -1,22 +1,22 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
 
-import type { ChannelDetail } from '../api/generated/ChannelDetail.ts'
-import type { ChannelEvent } from '../api/generated/ChannelEvent.ts'
-import type { ChannelEventKind } from '../api/generated/ChannelEventKind.ts'
-import type { ChannelPost } from '../api/generated/ChannelPost.ts'
+import type { WorkspaceDetail } from '../api/generated/WorkspaceDetail.ts'
+import type { WorkspaceEvent } from '../api/generated/WorkspaceEvent.ts'
+import type { WorkspaceEventKind } from '../api/generated/WorkspaceEventKind.ts'
+import type { WorkspacePost } from '../api/generated/WorkspacePost.ts'
 import type { WorkerEvent } from '../api/generated/WorkerEvent.ts'
-import { applyChannelEvent, channelTimeline, emptyChannel, fromDetail, withMeta } from './channel.ts'
+import { applyWorkspaceEvent, workspaceTimeline, emptyWorkspace, fromDetail, withMeta } from './workspace.ts'
 import { complete, mentionAt, segments, suggest } from './mentions.ts'
 
 let seq = 0
-const ev = (inner: ChannelEventKind): ChannelEvent => ({ channel_id: 'c1', seq: ++seq, ts: '', inner })
+const ev = (inner: WorkspaceEventKind): WorkspaceEvent => ({ workspace_id: 'c1', seq: ++seq, ts: '', inner })
 const worker = (id: string, event: WorkerEvent) => ev({ type: 'worker', data: { worker_id: id, event } })
-const run = (events: ChannelEvent[]) => events.reduce(applyChannelEvent, emptyChannel)
+const run = (events: WorkspaceEvent[]) => events.reduce(applyWorkspaceEvent, emptyWorkspace)
 
-const post = (id: string, text: string, timestamp = '2026-01-01T00:00:01Z'): ChannelPost => ({
+const post = (id: string, text: string, timestamp = '2026-01-01T00:00:01Z'): WorkspacePost => ({
   id,
-  channel_id: 'c1',
+  workspace_id: 'c1',
   seq: 0,
   author: { kind: 'operator' },
   author_name: 'You',
@@ -28,10 +28,10 @@ const post = (id: string, text: string, timestamp = '2026-01-01T00:00:01Z'): Cha
   timestamp,
 })
 
-const detail = (posts: ChannelPost[]): ChannelDetail => ({
+const detail = (posts: WorkspacePost[]): WorkspaceDetail => ({
   epoch: 'e',
   cursor: 0,
-  channel: { id: 'c1', workspace_id: 'w', name: 'launch', topic: '', created_at: '' },
+  workspace: { id: 'c1', team_id: 'w', name: 'launch', topic: '', created_at: '' },
   members: [],
   posts,
   notices: [],
@@ -40,7 +40,7 @@ const detail = (posts: ChannelPost[]): ChannelDetail => ({
 test('posts merge by id across detail and replay', () => {
   const p = post('p1', 'hi')
   const s = [ev({ type: 'post', data: p }), ev({ type: 'post', data: p })].reduce(
-    applyChannelEvent,
+    applyWorkspaceEvent,
     fromDetail(detail([p])),
   )
   assert.deepEqual(s.posts, [p])
@@ -52,7 +52,7 @@ test('a routing decision updates its post, even after a replay', () => {
     type: 'routed',
     data: { post_id: 'p1', routing: { state: 'chosen', worker_id: 'w1', reason: 'facts' } },
   })
-  const s = [ev({ type: 'post', data: p }), routed].reduce(applyChannelEvent, fromDetail(detail([p])))
+  const s = [ev({ type: 'post', data: p }), routed].reduce(applyWorkspaceEvent, fromDetail(detail([p])))
   assert.deepEqual(s.posts[0].routing, { state: 'chosen', worker_id: 'w1', reason: 'facts' })
 })
 
@@ -66,7 +66,7 @@ test('a worker turn streams live, then clears when it goes idle', () => {
   assert.deepEqual(Object.keys(s.running).sort(), ['w1', 'w2'])
   assert.deepEqual(s.running.w1.live, [{ kind: 'text', text: 'Draft' }])
 
-  s = [worker('w1', { type: 'status_changed', data: { state: 'idle' } })].reduce(applyChannelEvent, s)
+  s = [worker('w1', { type: 'status_changed', data: { state: 'idle' } })].reduce(applyWorkspaceEvent, s)
   assert.deepEqual(Object.keys(s.running), ['w2'])
 })
 
@@ -83,11 +83,11 @@ test('changes mark the detail stale; deletion stops everything', () => {
 
 test('notices are placed among posts by time', () => {
   let s = fromDetail(detail([post('p1', 'a', '2026-01-01T00:00:01Z'), post('p2', 'b', '2026-01-01T00:00:05Z')]))
-  s = applyChannelEvent(
+  s = applyWorkspaceEvent(
     s,
     ev({ type: 'notice', data: { id: 'n1', level: 'warning', text: 'stopped', timestamp: '2026-01-01T00:00:03Z' } }),
   )
-  const order = channelTimeline(s).map((i) => (i.kind === 'post' ? i.post.id : i.notice.id))
+  const order = workspaceTimeline(s).map((i) => (i.kind === 'post' ? i.post.id : i.notice.id))
   assert.deepEqual(order, ['p1', 'n1', 'p2'])
 })
 

@@ -1,8 +1,8 @@
 //! WebSockets of one worker's events (`GET /api/workers/{id}/stream`) or one
-//! channel's (`GET /api/channels/{id}/stream`).
+//! workspace's (`GET /api/workspaces/{id}/stream`).
 //!
 //! Protocol (server → client, JSON text frames, see [`StreamMessage`] and
-//! [`ChannelStreamMessage`]):
+//! [`WorkspaceStreamMessage`]):
 //! 1. `hello` with the server epoch and the cursor the stream starts after.
 //! 2. `event` frames: buffered events with `seq > since`, then live ones.
 //! 3. `resync` (then close) when the client can't be caught up — stale
@@ -23,7 +23,7 @@ use ts_rs::TS;
 
 use super::{ApiResult, AppState};
 use crate::WorkerId;
-use crate::event::{ChannelEvent, LogEvent, Replay, ServerEvent};
+use crate::event::{LogEvent, Replay, ServerEvent, WorkspaceEvent};
 use crate::manager::ManagerError;
 
 const PING_INTERVAL: Duration = Duration::from_secs(30);
@@ -53,18 +53,18 @@ pub enum StreamMessage {
     },
 }
 
-/// A frame sent from the server on a channel stream (same protocol as
+/// A frame sent from the server on a workspace stream (same protocol as
 /// [`StreamMessage`]).
 #[derive(Debug, Clone, Serialize, TS)]
 #[serde(tag = "type", rename_all = "snake_case")]
-pub enum ChannelStreamMessage {
+pub enum WorkspaceStreamMessage {
     Hello {
         epoch: String,
-        channel_id: String,
+        workspace_id: String,
         since: u64,
     },
     Event {
-        event: Box<ChannelEvent>,
+        event: Box<WorkspaceEvent>,
     },
     Resync {
         reason: String,
@@ -107,29 +107,29 @@ impl Frames for WorkerFrames {
     }
 }
 
-struct ChannelFrames(String);
+struct WorkspaceFrames(String);
 
-impl Frames for ChannelFrames {
-    type Event = ChannelEvent;
-    type Message = ChannelStreamMessage;
+impl Frames for WorkspaceFrames {
+    type Event = WorkspaceEvent;
+    type Message = WorkspaceStreamMessage;
 
-    fn hello(&self, epoch: String, since: u64) -> ChannelStreamMessage {
-        ChannelStreamMessage::Hello {
+    fn hello(&self, epoch: String, since: u64) -> WorkspaceStreamMessage {
+        WorkspaceStreamMessage::Hello {
             epoch,
-            channel_id: self.0.clone(),
+            workspace_id: self.0.clone(),
             since,
         }
     }
-    fn event(event: ChannelEvent) -> ChannelStreamMessage {
-        ChannelStreamMessage::Event {
+    fn event(event: WorkspaceEvent) -> WorkspaceStreamMessage {
+        WorkspaceStreamMessage::Event {
             event: Box::new(event),
         }
     }
-    fn resync(reason: String) -> ChannelStreamMessage {
-        ChannelStreamMessage::Resync { reason }
+    fn resync(reason: String) -> WorkspaceStreamMessage {
+        WorkspaceStreamMessage::Resync { reason }
     }
-    fn owns(&self, event: &ChannelEvent) -> bool {
-        event.channel_id == self.0
+    fn owns(&self, event: &WorkspaceEvent) -> bool {
+        event.workspace_id == self.0
     }
 }
 
@@ -166,19 +166,19 @@ pub(super) async fn stream(
     Ok(ws.on_upgrade(move |socket| run(socket, frames, epoch, since, replay, rx)))
 }
 
-pub(super) async fn channel_stream(
+pub(super) async fn workspace_stream(
     State(manager): State<AppState>,
     Path(id): Path<String>,
     Query(query): Query<StreamQuery>,
     ws: WebSocketUpgrade,
 ) -> ApiResult<Response> {
-    let hub = manager.channels()?;
-    hub.channel(&id).await?;
-    let frames = ChannelFrames(id.clone());
+    let hub = manager.workspaces()?;
+    hub.workspace(&id).await?;
+    let frames = WorkspaceFrames(id.clone());
     let since = match resume_point(&query, manager.epoch(), hub.log(&id).cursor()) {
         Ok(since) => since,
         Err(reason) => {
-            return Ok(ws.on_upgrade(move |s| resync_and_close::<ChannelFrames>(s, reason)));
+            return Ok(ws.on_upgrade(move |s| resync_and_close::<WorkspaceFrames>(s, reason)));
         }
     };
     let (replay, rx) = hub.subscribe(&id, since);

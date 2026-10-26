@@ -67,7 +67,7 @@ cargo run -p subspace-server
 # Elsewhere / another port
 cargo run -p subspace-server -- --data-dir ./data --bind 127.0.0.1:8080
 
-# Model that routes channel posts that mention nobody (default: claude-haiku-5-5)
+# Model that routes workspace posts that mention nobody (default: claude-haiku-5-5)
 cargo run -p subspace-server -- --router-model claude-sonnet-5-5
 ```
 

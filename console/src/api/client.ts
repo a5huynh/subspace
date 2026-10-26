@@ -1,24 +1,24 @@
 // Typed client for the subspace-server API. Wire types come from
 // `./generated` (ts-rs); regenerate them from Rust, don't edit them by hand.
 
-import type { Channel } from './generated/Channel'
-import type { ChannelDetail } from './generated/ChannelDetail'
-import type { ChannelEvent } from './generated/ChannelEvent'
-import type { ChannelPost } from './generated/ChannelPost'
-import type { ChannelStreamMessage } from './generated/ChannelStreamMessage'
-import type { CreateChannel } from './generated/CreateChannel'
+import type { Workspace } from './generated/Workspace'
+import type { WorkspaceDetail } from './generated/WorkspaceDetail'
+import type { WorkspaceEvent } from './generated/WorkspaceEvent'
+import type { WorkspacePost } from './generated/WorkspacePost'
+import type { WorkspaceStreamMessage } from './generated/WorkspaceStreamMessage'
+import type { CreateWorkspace } from './generated/CreateWorkspace'
 import type { CreateWorker } from './generated/CreateWorker'
 import type { ErrorBody } from './generated/ErrorBody'
 import type { Health } from './generated/Health'
 import type { History } from './generated/History'
 import type { ServerEvent } from './generated/ServerEvent'
 import type { StreamMessage } from './generated/StreamMessage'
-import type { UpdateChannel } from './generated/UpdateChannel'
+import type { UpdateWorkspace } from './generated/UpdateWorkspace'
 import type { UpdateWorker } from './generated/UpdateWorker'
 import type { WorkerDetail } from './generated/WorkerDetail'
 import type { WorkerSummary } from './generated/WorkerSummary'
-import type { Workspace } from './generated/Workspace'
-import type { WorkspaceDetail } from './generated/WorkspaceDetail'
+import type { Team } from './generated/Team'
+import type { TeamDetail } from './generated/TeamDetail'
 
 /** A non-2xx API response, carrying the server's `{"error": ...}` message. */
 export class ApiRequestError extends Error {
@@ -53,8 +53,8 @@ async function request<T>(method: string, path: string, body?: unknown): Promise
 }
 
 const worker = (id: string) => `/api/workers/${encodeURIComponent(id)}`
+const team = (id: string) => `/api/teams/${encodeURIComponent(id)}`
 const workspace = (id: string) => `/api/workspaces/${encodeURIComponent(id)}`
-const channel = (id: string) => `/api/channels/${encodeURIComponent(id)}`
 
 export const api = {
   health: () => request<Health>('GET', '/api/health'),
@@ -67,18 +67,18 @@ export const api = {
   prompt: (id: string, text: string) => request<void>('POST', `${worker(id)}/prompt`, { text }),
   history: (id: string) => request<History>('GET', `${worker(id)}/history`),
 
-  listWorkspaces: () => request<Workspace[]>('GET', '/api/workspaces'),
+  listTeams: () => request<Team[]>('GET', '/api/teams'),
+  getTeam: (id: string) => request<TeamDetail>('GET', team(id)),
+  createWorkspace: (teamId: string, body: CreateWorkspace) =>
+    request<Workspace>('POST', `${team(teamId)}/workspaces`, body),
   getWorkspace: (id: string) => request<WorkspaceDetail>('GET', workspace(id)),
-  createChannel: (workspaceId: string, body: CreateChannel) =>
-    request<Channel>('POST', `${workspace(workspaceId)}/channels`, body),
-  getChannel: (id: string) => request<ChannelDetail>('GET', channel(id)),
-  updateChannel: (id: string, body: UpdateChannel) => request<Channel>('PATCH', channel(id), body),
-  deleteChannel: (id: string) => request<void>('DELETE', channel(id)),
-  addChannelMember: (id: string, workerId: string) =>
-    request<void>('POST', `${channel(id)}/members`, { worker_id: workerId }),
-  removeChannelMember: (id: string, workerId: string) =>
-    request<void>('DELETE', `${channel(id)}/members/${encodeURIComponent(workerId)}`),
-  post: (id: string, text: string) => request<ChannelPost>('POST', `${channel(id)}/posts`, { text }),
+  updateWorkspace: (id: string, body: UpdateWorkspace) => request<Workspace>('PATCH', workspace(id), body),
+  deleteWorkspace: (id: string) => request<void>('DELETE', workspace(id)),
+  addWorkspaceMember: (id: string, workerId: string) =>
+    request<void>('POST', `${workspace(id)}/members`, { worker_id: workerId }),
+  removeWorkspaceMember: (id: string, workerId: string) =>
+    request<void>('DELETE', `${workspace(id)}/members/${encodeURIComponent(workerId)}`),
+  post: (id: string, text: string) => request<WorkspacePost>('POST', `${workspace(id)}/posts`, { text }),
 }
 
 export interface StreamHandlers<E> {
@@ -93,7 +93,7 @@ export interface StreamHandlers<E> {
   onConnectionChange?: (connected: boolean) => void
 }
 
-/** Where to resume a stream: from `api.history` or `api.getChannel`. */
+/** Where to resume a stream: from `api.history` or `api.getWorkspace`. */
 export interface StreamStart {
   cursor: number
   epoch: string
@@ -118,13 +118,13 @@ export function openWorkerStream(
   return openStream<ServerEvent, StreamMessage>(`${worker(id)}/stream`, from, handlers)
 }
 
-/** Open a channel's event stream (same behavior as `openWorkerStream`). */
-export function openChannelStream(
+/** Open a workspace's event stream (same behavior as `openWorkerStream`). */
+export function openWorkspaceStream(
   id: string,
   from: StreamStart,
-  handlers: StreamHandlers<ChannelEvent>,
+  handlers: StreamHandlers<WorkspaceEvent>,
 ): () => void {
-  return openStream<ChannelEvent, ChannelStreamMessage>(`${channel(id)}/stream`, from, handlers)
+  return openStream<WorkspaceEvent, WorkspaceStreamMessage>(`${workspace(id)}/stream`, from, handlers)
 }
 
 function openStream<E extends { seq: number }, F extends Frame<E>>(

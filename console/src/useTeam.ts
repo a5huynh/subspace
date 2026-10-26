@@ -1,16 +1,16 @@
 import { useCallback, useEffect, useState } from 'react'
 
 import { api } from './api/client'
-import type { WorkspaceDetail } from './api/generated/WorkspaceDetail'
+import type { TeamDetail } from './api/generated/TeamDetail'
 
 const POLL_MS = 3000
 
 /**
- * The current workspace (the default one, for now) with its channels and
+ * The current team (the default one, for now) with its workspaces and
  * members, polled; `refresh` reloads immediately.
  */
-export function useWorkspace() {
-  const [workspace, setWorkspace] = useState<WorkspaceDetail | null>(null)
+export function useTeam() {
+  const [team, setTeam] = useState<TeamDetail | null>(null)
   const [generation, setGeneration] = useState(0)
   const refresh = useCallback(() => setGeneration((g) => g + 1), [])
 
@@ -18,9 +18,9 @@ export function useWorkspace() {
     let active = true
     const poll = async () => {
       try {
-        const [first] = await api.listWorkspaces()
-        const detail = first ? await api.getWorkspace(first.id) : null
-        if (active) setWorkspace(detail)
+        const [first] = await api.listTeams()
+        const detail = first ? await api.getTeam(first.id) : null
+        if (active) setTeam(detail)
       } catch {
         // The worker list reports connection problems; keep the last value.
       }
@@ -33,5 +33,5 @@ export function useWorkspace() {
     }
   }, [generation])
 
-  return { workspace, refresh }
+  return { team, refresh }
 }

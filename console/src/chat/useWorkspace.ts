@@ -1,35 +1,35 @@
 import { useEffect, useReducer, useState } from 'react'
 
-import { api, openChannelStream } from '../api/client'
-import type { ChannelDetail } from '../api/generated/ChannelDetail'
-import type { ChannelEvent } from '../api/generated/ChannelEvent'
-import { applyChannelEvent, emptyChannel, fromDetail, withMeta, type ChannelState } from './channel'
+import { api, openWorkspaceStream } from '../api/client'
+import type { WorkspaceDetail } from '../api/generated/WorkspaceDetail'
+import type { WorkspaceEvent } from '../api/generated/WorkspaceEvent'
+import { applyWorkspaceEvent, emptyWorkspace, fromDetail, withMeta, type WorkspaceState } from './workspace'
 
 type Action =
-  | { type: 'detail'; detail: ChannelDetail }
-  | { type: 'meta'; detail: ChannelDetail }
-  | { type: 'event'; event: ChannelEvent }
+  | { type: 'detail'; detail: WorkspaceDetail }
+  | { type: 'meta'; detail: WorkspaceDetail }
+  | { type: 'event'; event: WorkspaceEvent }
 
-function reducer(state: ChannelState, action: Action): ChannelState {
+function reducer(state: WorkspaceState, action: Action): WorkspaceState {
   switch (action.type) {
     case 'detail':
       return fromDetail(action.detail)
     case 'meta':
       return withMeta(state, action.detail)
     case 'event':
-      return applyChannelEvent(state, action.event)
+      return applyWorkspaceEvent(state, action.event)
   }
 }
 
 const RETRY_MS = 2000
 
 /**
- * Live state for one channel: fetch its detail, stream events from its
+ * Live state for one workspace: fetch its detail, stream events from its
  * cursor, refetch name/topic/members when they change, and on `resync`
  * refetch everything and reopen.
  */
-export function useChannel(id: string) {
-  const [state, dispatch] = useReducer(reducer, emptyChannel)
+export function useWorkspace(id: string) {
+  const [state, dispatch] = useReducer(reducer, emptyWorkspace)
   const [connected, setConnected] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
@@ -42,11 +42,11 @@ export function useChannel(id: string) {
       close?.()
       close = null
       try {
-        const detail = await api.getChannel(id)
+        const detail = await api.getWorkspace(id)
         if (cancelled) return
         setError(null)
         dispatch({ type: 'detail', detail })
-        close = openChannelStream(id, detail, {
+        close = openWorkspaceStream(id, detail, {
           onEvent: (event) => dispatch({ type: 'event', event }),
           onResync: () => void load(),
           onConnectionChange: setConnected,
@@ -71,7 +71,7 @@ export function useChannel(id: string) {
   useEffect(() => {
     if (!state.stale || state.deleted) return
     let active = true
-    api.getChannel(id).then(
+    api.getWorkspace(id).then(
       (detail) => active && dispatch({ type: 'meta', detail }),
       () => {},
     )

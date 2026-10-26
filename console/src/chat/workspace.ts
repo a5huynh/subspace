@@ -1,22 +1,22 @@
-// Pure state for one channel: fetched detail merged with streamed events.
+// Pure state for one workspace: fetched detail merged with streamed events.
 //
 // Posts and notices merge by id, so detail and replayed events never
 // duplicate. Each worker taking a turn gets its own `ChatState`, driven by
 // the same reducer as a DM, and is dropped when it goes idle (its reply
 // arrives as a post).
 
-import type { Channel } from '../api/generated/Channel'
-import type { ChannelDetail } from '../api/generated/ChannelDetail'
-import type { ChannelEvent } from '../api/generated/ChannelEvent'
-import type { ChannelMember } from '../api/generated/ChannelMember'
-import type { ChannelPost } from '../api/generated/ChannelPost'
+import type { Workspace } from '../api/generated/Workspace'
+import type { WorkspaceDetail } from '../api/generated/WorkspaceDetail'
+import type { WorkspaceEvent } from '../api/generated/WorkspaceEvent'
+import type { WorkspaceMember } from '../api/generated/WorkspaceMember'
+import type { WorkspacePost } from '../api/generated/WorkspacePost'
 import type { Notice } from '../api/generated/Notice'
 import { applyWorkerEvent, emptyChat, mergeById, time, type ChatState } from './state.ts'
 
-export interface ChannelState {
-  channel: Channel | null
-  members: ChannelMember[]
-  posts: ChannelPost[]
+export interface WorkspaceState {
+  workspace: Workspace | null
+  members: WorkspaceMember[]
+  posts: WorkspacePost[]
   notices: Notice[]
   /** Workers mid-turn, by id: their live activity. */
   running: Record<string, ChatState>
@@ -25,8 +25,8 @@ export interface ChannelState {
   deleted: boolean
 }
 
-export const emptyChannel: ChannelState = {
-  channel: null,
+export const emptyWorkspace: WorkspaceState = {
+  workspace: null,
   members: [],
   posts: [],
   notices: [],
@@ -36,10 +36,10 @@ export const emptyChannel: ChannelState = {
 }
 
 /** Start from fetched detail; live activity is rebuilt by the replay. */
-export function fromDetail(detail: ChannelDetail): ChannelState {
+export function fromDetail(detail: WorkspaceDetail): WorkspaceState {
   return {
-    ...emptyChannel,
-    channel: detail.channel,
+    ...emptyWorkspace,
+    workspace: detail.workspace,
     members: detail.members,
     posts: mergeById([], detail.posts),
     notices: mergeById([], detail.notices),
@@ -47,11 +47,11 @@ export function fromDetail(detail: ChannelDetail): ChannelState {
 }
 
 /** Refresh name, topic, and members without touching the transcript. */
-export function withMeta(state: ChannelState, detail: ChannelDetail): ChannelState {
-  return { ...state, channel: detail.channel, members: detail.members, stale: false }
+export function withMeta(state: WorkspaceState, detail: WorkspaceDetail): WorkspaceState {
+  return { ...state, workspace: detail.workspace, members: detail.members, stale: false }
 }
 
-export function applyChannelEvent(state: ChannelState, event: ChannelEvent): ChannelState {
+export function applyWorkspaceEvent(state: WorkspaceState, event: WorkspaceEvent): WorkspaceState {
   const inner = event.inner
   switch (inner.type) {
     case 'post':
@@ -82,12 +82,12 @@ export function applyChannelEvent(state: ChannelState, event: ChannelEvent): Cha
   }
 }
 
-export type ChannelItem = { kind: 'post'; post: ChannelPost } | { kind: 'notice'; notice: Notice }
+export type WorkspaceItem = { kind: 'post'; post: WorkspacePost } | { kind: 'notice'; notice: Notice }
 
 /** Posts in order, with each notice placed by time. */
-export function channelTimeline(state: ChannelState): ChannelItem[] {
+export function workspaceTimeline(state: WorkspaceState): WorkspaceItem[] {
   const notices = [...state.notices].sort((a, b) => time(a.timestamp) - time(b.timestamp))
-  const out: ChannelItem[] = []
+  const out: WorkspaceItem[] = []
   let n = 0
   for (const post of state.posts) {
     while (n < notices.length && time(notices[n].timestamp) < time(post.timestamp)) {
