@@ -21,6 +21,7 @@ a web console to create, configure, steer, and observe them.
 - [Crate & Package Structure](#crate--package-structure)
 - [Data Model & Core Entities](#data-model--core-entities)
 - [Server Subsystems](#server-subsystems)
+- [Workspaces, Channels & DMs](#workspaces-channels--dms)
 - [Event Model](#event-model)
 - [API Surface](#api-surface)
 - [Guardrails, Policies & Approvals](#guardrails-policies--approvals)
@@ -53,7 +54,8 @@ The product is a "team of agents you manage," not a library you embed.
 
 - **Worker** — a persistent, named, independently-operating agent (think: an employee).
   It has a role (system prompt), bound integrations, private memory/history, and a
-  lifecycle that outlives any single task. Workers do not share conversation state.
+  lifecycle that outlives any single task. Each worker keeps its own model context; what
+  workers share is a channel's public transcript, never each other's sessions.
 - **Worker Home** — a per-worker directory holding everything *authored* about the worker:
   config (`worker.toml`), persona (`ROLE.md`), skills, and private memory notes. Copying a
   home clones the agent. Runtime state (history, events, approvals, credentials) lives in
@@ -62,6 +64,14 @@ The product is a "team of agents you manage," not a library you embed.
   instructions) plus optional supporting files. Only the name/description are injected;
   the worker reads the body on demand (progressive disclosure). Skills are resolved by
   layered lookup: worker → global → built-in.
+- **Workspace** — a top-level container (like a Slack workspace) holding channels and the
+  workers that may join them. A worker can belong to any number of workspaces. One default
+  workspace, **General**, exists to start with.
+- **Channel** — collaborative context for a piece of work: a named, shared transcript
+  inside a workspace whose members are the human operator plus some workers. Workers reply
+  when @mentioned, including by each other, which is how agents talk to one another.
+- **DM** — the private 1:1 conversation between the operator and one worker (the original
+  "chat with a worker"). Every worker has exactly one.
 - **Mailbox** — a per-worker input queue. Both user prompts and routed integration events
   land here as **Stimuli**. The worker's agent loop consumes the mailbox; it does not care
   whether an item came from a human or a webhook. This is the primitive that unifies
@@ -498,11 +508,94 @@ hook — TBD in Phase D.)
 
 ### History & Compaction
 
-A worker's conversation is continuous: history is reloaded on boot and appended forever.
+A worker has one *session* (model context) per conversation: its DM, plus one per channel
+it takes part in (see [Workspaces, Channels & DMs](#workspaces-channels--dms)). Each
+session is continuous: history is reloaded on demand and appended forever.
 To keep context bounded, `ControlMsg::Compact` (also triggered automatically past a token
 threshold) summarizes older turns into a compaction record and starts a fresh working
 context. The full transcript stays in `messages`; only the agent's working context is
-replaced. A "new task" is a compaction, never a fork into a separate conversation.
+replaced. A "new task" in a DM is a compaction; separate pieces of work get a channel.
+
+---
+
+## Workspaces, Channels & DMs
+
+Slack-shaped collaboration. A **workspace** contains **channels**; a channel is the shared
+context for one piece of work, and its members (the operator plus some workers) talk in
+one transcript. The operator's private 1:1 chat with a worker is its **DM**.
+
+### Membership
+
+- Workspaces ↔ workers is many-to-many. A new worker joins **General** (the default,
+  seeded on first boot); existing workers with no workspace are added to it on boot.
+- A channel belongs to one workspace; its worker members must be members of that
+  workspace. Removing a worker from a workspace removes it from that workspace's channels.
+- The operator is an implicit member of every channel (single-tenant, no auth).
+- Each member has a **handle** used for mentions: the slugified worker name (`Research
+  Bot` → `@research-bot`). Handles must be unique within a channel; adding a worker whose
+  handle collides is rejected. The operator's handle is `@you`.
+
+### Public transcript vs. private sessions
+
+Two records, kept separate:
+
+1. **Posts**: the channel's public transcript (`channel_posts`): author (operator or
+   worker, with the author's name captured at post time), text, mentions, and routing data.
+   Everyone sees these.
+2. **Sessions**: each worker's private model context *for that channel* (rows in
+   `messages` with `conversation = channel:<id>`), including its tool calls and results.
+   Other members only see the final reply.
+
+A worker's DM is the conversation `dm`. The engine is unchanged: one `Agent` per worker,
+and the worker swaps the agent's messages when it switches conversations
+(`Agent::replace_messages`). The engine still sees only user/assistant turns; speaker
+attribution lives in the text.
+
+### A channel turn
+
+When a worker is woken in a channel (`Stimulus::ChannelTurn`), it:
+
+1. Collects the posts since its last turn (`channel_members.last_seen_seq`), excluding
+   its own. A first turn (or a long gap) is capped at the most recent 50 posts, with a
+   note that earlier posts were omitted. If there is nothing new, the turn is skipped,
+   which de-duplicates repeated wakes.
+2. Prompts its channel session with one user message:
+   ```
+   <channel name="launch-plan" workspace="General">
+   Members: @you (human operator), @researcher (Researcher: finds facts), @writer (Writer: drafts copy)
+   You are @writer.
+   New posts:
+   [@you] @researcher what changed in v2?
+   [@researcher] Three things: ...  @writer can you draft the announcement?
+   </channel>
+   Reply with your next post in this channel. Mention @handle to ask a member to respond.
+   ```
+3. Posts the final assistant text of the run as its reply. A run that fails produces a
+   channel notice instead of a post.
+
+Live activity (text deltas, tool calls) streams on the channel's event log while the
+worker runs, so viewers watch it work; afterwards the post holds only the text.
+
+### Routing and loop safety
+
+- **Mention-only.** A post wakes the members it @mentions, except its author. A post with
+  no mentions wakes nobody.
+- **Hop limit.** Each operator post starts a chain (`root_id`, `hops = 0`). A worker's
+  reply carries `hops = trigger.hops + 1`. When a reply at `hops ≥ HOP_LIMIT` (default
+  **5**) mentions workers, they are not woken; a notice says the chain stopped and the
+  operator can continue it by posting.
+- **One thing at a time.** A worker's mailbox is still serial: a mention while it is busy
+  in its DM (or another channel) waits in line. Delivery between workers never blocks a
+  worker's loop (a full mailbox drops the wake with a notice).
+
+### Deferred (wanted)
+
+- **Channel files**: a shared folder per channel that members can read and write (like
+  Slack canvases). Planned; likely lands with Phase E's memory/wiki work.
+- **Lead worker**: an optional per-channel worker that answers every operator post without
+  a mention.
+- `@channel` mentions; a tool-call summary attached to posts; multiple workspaces in the
+  console (the data model and API already allow them).
 
 ---
 
@@ -530,8 +623,27 @@ enum WorkerEvent {
 }
 ```
 
-- Cross-worker isolation: no shared event stream between workers; the console subscribes
-  per worker (or to a filtered global feed).
+- A worker's event log carries its DM activity plus status changes. Activity from a
+  channel run goes to that **channel's** event log instead, wrapped with the worker id:
+
+```rust
+struct ChannelEvent {
+    channel_id: ChannelId,
+    seq: u64,                 // monotonic per channel
+    ts: DateTime<Utc>,
+    inner: ChannelEventKind,
+}
+
+enum ChannelEventKind {
+    Post(ChannelPost),                            // persisted, stable id
+    Notice(Notice),                               // run failure, hop limit, ...
+    Worker { worker_id: WorkerId, event: WorkerEvent },  // live run activity
+    MembersChanged,
+}
+```
+
+- Clients resume either log with `since` + `epoch`. A channel's resume cursor points before
+  the earliest run still in progress, so a reconnect replays every active run in full.
 - `seq` enables reconnect/replay so the console can catch up after a dropped socket.
 - This is also the on-the-wire payload for WS, and the serialization target that the old
   "RPC mode" was reaching for — now with worker addressing.
@@ -553,6 +665,14 @@ enum WorkerEvent {
 | `POST /workers/{id}/pause` · `/resume` | lifecycle control |
 | `GET /workers/{id}/history` | conversation/message history |
 | `GET /workers/{id}/memory` | browse private memory |
+| `GET /workspaces` | list workspaces |
+| `GET /workspaces/{id}` | workspace detail: members + channels |
+| `POST /workspaces/{id}/members` · `DELETE …/members/{worker}` | add / remove a worker |
+| `POST /workspaces/{id}/channels` | create a channel (name, topic, initial members) |
+| `GET /channels/{id}` | channel detail, members, posts, notices, stream cursor |
+| `PATCH /channels/{id}` · `DELETE /channels/{id}` | rename / set topic · delete |
+| `POST /channels/{id}/members` · `DELETE …/members/{worker}` | channel membership |
+| `POST /channels/{id}/posts` | post as the operator (routes mentions) |
 | `GET /integrations` | available integrations + manifests |
 | `POST /workers/{id}/integrations` | bind an integration + store credentials |
 | `DELETE /workers/{id}/integrations/{integration}` | unbind |
@@ -567,6 +687,7 @@ enum WorkerEvent {
 ### Streaming
 
 - `GET /workers/{id}/stream` — WebSocket (or SSE) of `ServerEvent`s for one worker.
+- `GET /channels/{id}/stream` — WebSocket of `ChannelEvent`s for one channel.
 - `GET /stream` — filtered global feed across workers.
 - Clients send `?since={seq}` to resume.
 
@@ -608,8 +729,12 @@ struct PolicyRule {
 
 Responsibilities (React + Vite + TypeScript):
 
-- **Workers**: list/create/configure; per-worker view with live activity stream.
-- **Chat**: talk to a worker; see thinking, tool calls, and results in real time.
+- **Layout** (Slack-shaped): a sidebar with the workspace, its **Channels**, and **Direct
+  messages** (one per worker).
+- **Workers**: list/create/configure; the DM view shows live activity.
+- **Chat**: DM a worker; see thinking, tool calls, and results in real time.
+- **Channels**: create, set topic, manage members; a shared transcript with author names,
+  @mention autocomplete, and each responding worker's live activity.
 - **Integrations**: browse available integrations, bind them to a worker, enter
   credentials (write-only), manage subscriptions/triggers.
 - **Wiki**: browse/edit shared knowledge; review & approve/reject worker-proposed edits;
@@ -636,10 +761,15 @@ for wiring and state.
 | `legacy_workers` | A3 rows not yet moved into homes; drained on `boot()` (home created first, then index + delete in one transaction). Unconvertible rows are logged and left in place. |
 | `worker_integrations` | worker_id, integration, credential_ref |
 | `subscriptions` | id, worker_id, integration, event_kind, filter(json) |
-| `messages` | id, worker_id, role, content(json), ts — conversation history |
+| `messages` | id, worker_id, conversation (`dm` or `channel:<id>`), role, content(json), ts — each worker's private sessions |
+| `workspaces` | id, name, created_at; `General` seeded on first boot |
+| `workspace_members` | workspace_id, worker_id, joined_at |
+| `channels` | id, workspace_id, name (unique per workspace), topic, created_at |
+| `channel_members` | channel_id, worker_id, last_seen_seq, joined_at |
+| `channel_posts` | seq, id, channel_id, author_kind, author_id, author_name, text, mentions(json), root_id, hops, created_at |
 | `memory_notes` | id, worker_id, path, text, tags(json), ts — FTS5 **index** over `memory/*.md` |
 | `compactions` | id, worker_id, summary, through_seq, ts |
-| `notices` | id, worker_id, level (warning/error), text, created_at; run errors shown to humans, never sent to the model |
+| `notices` | id, worker_id, conversation, level (warning/error), text, created_at; run errors shown to humans, never sent to the model |
 | `wiki_docs` | path, title, current_rev |
 | `wiki_revisions` | id, path, content, author (worker/human), status(proposed/approved), ts |
 | `credentials` | worker_id, integration, ciphertext, nonce |
@@ -659,10 +789,11 @@ initially (see Deferred).
 | **A** | Persistence (SQLite) + `Worker` + `WorkerManager`; one worker, interactive via a minimal API | long-lived, stateful loop |
 | **A4 (done)** | Worker Home: `worker.toml` + `ROLE.md` as source of truth, `workers` table as index, migrate A3 rows to homes; skill discovery + injection; home-scoped file tools | identity is portable files |
 | **B (done)** | Server API (REST + WS) + minimal web console: create worker, chat, watch live events | usable interactively |
+| **B2** | Workspaces & channels: default workspace, channels with shared transcripts, mention routing with a hop limit, DMs as today's chat; Slack-style console | agents collaborate in shared context |
 | **C** | Integration framework (actions + credential/secret store) + **email** integration end-to-end (actions only) | worker acts on a real service |
 | **D** | Trigger Router (webhook ingress + pollers + subscriptions) + action approval checkpoint | **secretary reacts to incoming email** |
 | **E** | Memory: private memory tools + shared wiki (FTS + versioned propose/approve) + console curation | knowledge substrate |
-| **F** | Multi-worker coordination: ephemeral delegation (agents-as-tools) + durable handoffs (task table / mailbox messages), routed by worker `description` | the "workforce" |
+| **F** | Multi-worker coordination beyond channels: ephemeral delegation (agents-as-tools) + durable handoffs (task table), routed by worker `description` | the "workforce" |
 | **Later** | more integrations, MCP integration interface, semantic search, tool sandboxing, additional providers | scale/hardening |
 
 `A → B → C → D` is the fastest path to the compelling demo: a secretary that reacts to
@@ -705,7 +836,10 @@ incoming email *and* answers questions about it. `E` and `F` enrich from there.
   (container/namespace) is a hardening item.
 - **Semantic memory.** FTS first; vector embeddings + a store is a later, dependency-heavy
   upgrade.
-- **Cross-worker protocol (Phase F).** Leaning toward *both*: agents-as-tools for short,
+- **Channel files.** Wanted: a shared folder per channel (see
+  [Workspaces, Channels & DMs](#deferred-wanted)).
+- **Cross-worker protocol (Phase F).** Channels (B2) already let workers hand work to each
+  other in the open. Beyond that, leaning toward *both*: agents-as-tools for short,
   ephemeral delegation whose result returns to the caller's context, plus a durable task
   table (or mailbox messages) for handoffs that must survive crashes, retry, and be
   visible/editable by humans. Open: whether the durable path is a task board or plain
