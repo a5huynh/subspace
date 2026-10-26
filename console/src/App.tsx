@@ -1,13 +1,20 @@
+import { ChannelSettings, NewChannelForm } from './components/ChannelForm'
+import { ChannelView } from './components/ChannelView'
 import { Chat } from './components/Chat'
+import { Sidebar } from './components/Sidebar'
 import { WorkerForm } from './components/WorkerForm'
-import { WorkerList } from './components/WorkerList'
 import { href, useRoute } from './route'
 import { useWorkers } from './useWorkers'
+import { useWorkspace } from './useWorkspace'
 
 export default function App() {
   const route = useRoute()
-  const { workers, error, refresh } = useWorkers()
-  const onChanged = refresh
+  const { workers, error, refresh: refreshWorkers } = useWorkers()
+  const { workspace, refresh: refreshWorkspace } = useWorkspace()
+  const onChanged = () => {
+    refreshWorkers()
+    refreshWorkspace()
+  }
 
   let main
   switch (route.page) {
@@ -28,12 +35,31 @@ export default function App() {
       )
       break
     }
+    case 'new-channel':
+      main = <NewChannelForm workspace={workspace} workers={workers} onChanged={onChanged} />
+      break
+    case 'channel':
+      main = <ChannelView key={route.id} id={route.id} />
+      break
+    case 'channel-settings':
+      main = (
+        <ChannelSettings
+          key={route.id}
+          id={route.id}
+          workspace={workspace}
+          workers={workers}
+          onChanged={onChanged}
+        />
+      )
+      break
     case 'home':
       main = (
         <section className="panel">
-          <h2>Workers</h2>
+          <h2>{workspace?.workspace.name ?? 'Subspace'}</h2>
           <p className="muted">
-            Pick a worker on the left, or <a href={href({ page: 'new' })}>create one</a>.
+            Open a channel to work with several workers together, or a direct message to talk to
+            one. <a href={href({ page: 'new-channel' })}>Create a channel</a> or{' '}
+            <a href={href({ page: 'new' })}>a worker</a>.
           </p>
         </section>
       )
@@ -42,7 +68,7 @@ export default function App() {
 
   return (
     <div className="layout">
-      <WorkerList workers={workers} error={error} route={route} />
+      <Sidebar workspace={workspace} workers={workers} error={error} route={route} />
       <main className="main">{main}</main>
     </div>
   )

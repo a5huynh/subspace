@@ -11,6 +11,7 @@ import type { Message } from '../api/generated/Message'
 import type { Notice } from '../api/generated/Notice'
 import type { ServerEvent } from '../api/generated/ServerEvent'
 import type { ToolResult } from '../api/generated/ToolResult'
+import type { WorkerEvent } from '../api/generated/WorkerEvent'
 import type { WorkerStatus } from '../api/generated/WorkerStatus'
 import type { JsonValue } from '../api/generated/serde_json/JsonValue'
 
@@ -57,7 +58,11 @@ export function fromHistory(prev: ChatState, messages: Message[], notices: Notic
 }
 
 export function applyEvent(state: ChatState, event: ServerEvent): ChatState {
-  const inner = event.inner
+  return applyWorkerEvent(state, event.inner)
+}
+
+/** Apply one worker event (also used for a worker's activity in a channel). */
+export function applyWorkerEvent(state: ChatState, inner: WorkerEvent): ChatState {
   switch (inner.type) {
     case 'user_message':
       return { ...state, messages: mergeById(state.messages, [inner.data]) }
@@ -164,6 +169,6 @@ export function timeline(state: ChatState): TimelineItem[] {
   return out
 }
 
-function time(ts: string): number {
+export function time(ts: string): number {
   return Date.parse(ts)
 }

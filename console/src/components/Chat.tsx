@@ -1,9 +1,10 @@
-import { useEffect, useLayoutEffect, useRef, useState, type KeyboardEvent } from 'react'
+import { useState, type KeyboardEvent } from 'react'
 
 import { api } from '../api/client'
 import type { WorkerSummary } from '../api/generated/WorkerSummary'
 import { timeline, toolResults } from '../chat/state'
 import { useWorkerChat } from '../chat/useWorkerChat'
+import { useScrollToBottom } from '../useScrollToBottom'
 import { href } from '../route'
 import { LiveView, MessageView } from './MessageView'
 import { StatusBadge } from './StatusBadge'
@@ -103,28 +104,4 @@ function Composer({ workerId, busy }: { workerId: string; busy: boolean }) {
       </button>
     </form>
   )
-}
-
-/** Keep a scroll container pinned to the bottom while the user is near it. */
-function useScrollToBottom(deps: unknown[]) {
-  const ref = useRef<HTMLDivElement>(null)
-  const pinned = useRef(true)
-
-  useEffect(() => {
-    const el = ref.current
-    if (!el) return
-    const onScroll = () => {
-      pinned.current = el.scrollHeight - el.scrollTop - el.clientHeight < 80
-    }
-    el.addEventListener('scroll', onScroll)
-    return () => el.removeEventListener('scroll', onScroll)
-  }, [])
-
-  useLayoutEffect(() => {
-    const el = ref.current
-    if (el && pinned.current) el.scrollTop = el.scrollHeight
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, deps)
-
-  return ref
 }

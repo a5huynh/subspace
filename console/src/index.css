@@ -108,44 +108,83 @@ h2 {
   text-decoration: none;
 }
 
-.worker-list {
+.workspace-name {
+  font-size: 0.8rem;
+  color: var(--muted);
+}
+
+.section-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin: 14px 10px 4px;
+  font-size: 0.75rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--muted);
+}
+
+.section-add {
+  color: var(--muted);
+  text-decoration: none;
+  font-size: 1.1rem;
+  line-height: 1;
+  padding: 0 4px;
+  border-radius: 4px;
+}
+.section-add:hover {
+  color: var(--fg);
+  background: var(--bg-soft);
+}
+
+.indent {
+  margin: 4px 10px;
+}
+
+.nav-list {
   list-style: none;
   margin: 0;
   padding: 0;
 }
 
-.worker-list a {
+.nav-list a {
   display: grid;
   grid-template-columns: 14px 1fr;
   column-gap: 8px;
   align-items: center;
-  padding: 8px 10px;
+  padding: 6px 10px;
   border-radius: 8px;
   color: var(--fg);
   text-decoration: none;
 }
 
-.worker-list a:hover {
+.nav-list a:hover {
   background: var(--bg-soft);
 }
-.worker-list a.selected {
+.nav-list a.selected {
   background: var(--user-bubble);
 }
 
-.worker-name {
+.nav-name {
   font-weight: 500;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.worker-desc {
+.nav-desc {
   grid-column: 2;
   font-size: 0.8rem;
   color: var(--muted);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.hash {
+  color: var(--muted);
+  margin-right: 2px;
 }
 
 .dot {
@@ -439,4 +478,147 @@ textarea {
 .composer .error {
   grid-column: 1 / -1;
   margin: 0;
+}
+
+/* Channels */
+
+.post {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  max-width: min(820px, 100%);
+}
+
+.post-meta {
+  display: flex;
+  gap: 8px;
+  align-items: baseline;
+}
+
+.post-author {
+  font-weight: 600;
+}
+
+.post-operator .post-author {
+  color: var(--accent);
+}
+
+.post-live {
+  border-left: 2px solid var(--success);
+  padding-left: 10px;
+}
+
+.post-live .bubble {
+  max-width: 100%;
+}
+
+.mention {
+  color: var(--accent);
+  font-weight: 500;
+}
+.mention-me {
+  background: var(--user-bubble);
+  border-radius: 4px;
+  padding: 0 2px;
+}
+
+.composer-input {
+  position: relative;
+}
+
+.mentions {
+  position: absolute;
+  bottom: calc(100% + 6px);
+  left: 0;
+  min-width: 240px;
+  list-style: none;
+  margin: 0;
+  padding: 4px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  box-shadow: 0 6px 20px rgb(0 0 0 / 0.12);
+  z-index: 1;
+}
+
+.mentions li {
+  display: flex;
+  gap: 8px;
+  align-items: baseline;
+  padding: 6px 8px;
+  border-radius: 6px;
+  cursor: pointer;
+}
+.mentions li.active {
+  background: var(--user-bubble);
+}
+
+.checklist {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 8px 12px 12px;
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.checklist legend {
+  font-size: 0.85rem;
+  color: var(--muted);
+  padding: 0 4px;
+}
+
+.form .check,
+.check {
+  flex-direction: row;
+  align-items: baseline;
+  gap: 8px;
+  color: var(--fg);
+  font-size: 0.95rem;
+}
+
+.check input {
+  width: auto;
+}
+
+h3 {
+  margin: 28px 0 8px;
+  font-size: 1rem;
+}
+
+.member-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+
+.member-list li {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+  padding: 8px 12px;
+}
+.member-list li + li {
+  border-top: 1px solid var(--border);
+}
+.member-list li button {
+  margin-left: auto;
+}
+
+.small-button {
+  padding: 2px 10px;
+  font-size: 0.85rem;
+}
+
+.add-member {
+  display: flex;
+  gap: 10px;
+  margin-top: 10px;
+}
+
+.danger-zone {
+  margin-top: 28px;
 }
