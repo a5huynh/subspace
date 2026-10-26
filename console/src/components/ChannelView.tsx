@@ -1,19 +1,32 @@
-import { useLayoutEffect, useMemo, useRef, useState, type KeyboardEvent } from 'react'
+import { useMemo, type ReactNode } from 'react'
 
 import { api } from '../api/client'
 import type { ChannelMember } from '../api/generated/ChannelMember'
-import type { ChannelPost } from '../api/generated/ChannelPost'
 import type { Routing } from '../api/generated/Routing'
 import { channelTimeline } from '../chat/channel'
-import { OPERATOR_HANDLE, complete, mentionAt, segments, suggest } from '../chat/mentions'
+import { layoutRows } from '../chat/format'
+import { OPERATOR_HANDLE, segments } from '../chat/mentions'
 import { isToolResultMessage, toolResults, type ChatState } from '../chat/state'
 import { useChannel } from '../chat/useChannel'
 import { href } from '../route'
+import { useNow } from '../useNow'
 import { useScrollToBottom } from '../useScrollToBottom'
-import { LiveView, MessageView } from './MessageView'
+import { LiveContent, MessageContent } from './MessageView'
+import {
+  Avatar,
+  Composer,
+  ConnectionDot,
+  ConversationHeader,
+  DayDivider,
+  EmptyState,
+  MessageList,
+  MessageRow,
+  NoticeRow,
+} from './ui'
 
 export function ChannelView({ id }: { id: string }) {
   const { state, connected, error } = useChannel(id)
+  const now = useNow()
   const scroller = useScrollToBottom([state.posts, state.notices, state.running])
   const known = useMemo(
     () => new Set([OPERATOR_HANDLE, ...state.members.map((m) => m.handle)]),
@@ -22,298 +35,184 @@ export function ChannelView({ id }: { id: string }) {
 
   if (state.deleted) {
     return (
-      <section className="panel">
-        <p className="muted">
-          This channel was deleted. <a href={href({ page: 'home' })}>Back home</a>
-        </p>
-      </section>
+      <EmptyState>
+        This channel was deleted. <a href={href({ page: 'home' })}>Back home</a>
+      </EmptyState>
     )
   }
 
   const channel = state.channel
   const nameOf = (workerId: string) =>
     state.members.find((m) => m.worker_id === workerId)?.name ?? 'A worker'
+  const renderText = (text: string) => <PostText text={text} known={known} />
+
+  const items = channelTimeline(state)
+  const running = Object.entries(state.running)
+  const layout = layoutRows([
+    ...items.map((item) =>
+      item.kind === 'post'
+        ? {
+            author:
+              item.post.author.kind === 'operator' ? 'operator' : `worker:${item.post.author.id}`,
+            timestamp: item.post.timestamp,
+          }
+        : { author: null, timestamp: item.notice.timestamp },
+    ),
+    // Live turns always get their own header.
+    ...running.map(() => ({ author: null, timestamp: now })),
+  ])
 
   return (
-    <section className="chat">
-      <header className="chat-header">
-        <div>
-          <h2>
-            <span className="hash">#</span>
-            {channel?.name ?? '…'}
-          </h2>
-          <p className="muted small">
-            {channel?.topic && <>{channel.topic} · </>}
-            <MemberSummary members={state.members} />
-          </p>
-        </div>
-        <div className="chat-header-right">
-          <span className={connected ? 'conn conn-on' : 'conn conn-off'}>
-            {connected ? 'live' : 'connecting…'}
-          </span>
-          <a className="button secondary" href={href({ page: 'channel-settings', id })}>
-            Settings
-          </a>
-        </div>
-      </header>
+    <section className="flex min-h-0 flex-1 flex-col">
+      <ConversationHeader
+        title={
+          <>
+            <span className="font-normal text-muted">#</span>
+            <span className="truncate">{channel?.name ?? '…'}</span>
+          </>
+        }
+        subtitle={channel?.topic || undefined}
+        right={
+          <>
+            <ConnectionDot connected={connected} />
+            <MemberStack members={state.members} channelId={id} />
+          </>
+        }
+      />
 
-      <div className="messages" ref={scroller}>
-        {error && <p className="error small">{error}</p>}
-        {channel && state.posts.length === 0 && (
-          <p className="muted empty">
+      <MessageList scroller={scroller}>
+        {error && <p className="px-5 text-[13px] text-danger">{error}</p>}
+        {channel && items.length === 0 && running.length === 0 && (
+          <EmptyState>
+            <span className="mb-1 block text-lg font-black text-ink">Welcome to #{channel.name}</span>
             {state.members.length === 0
               ? 'Add workers in Settings to get them talking.'
               : 'Ask anything: the best-suited member answers, or @mention someone directly.'}
-          </p>
+          </EmptyState>
         )}
-        {channelTimeline(state).map((item) =>
-          item.kind === 'post' ? (
-            <Post key={item.post.id} post={item.post} known={known} nameOf={nameOf} />
-          ) : (
-            <p key={item.notice.id} className={`notice notice-${item.notice.level}`}>
-              {item.notice.text}
-            </p>
-          ),
-        )}
-        {Object.entries(state.running).map(([workerId, chat]) => (
-          <Working key={workerId} name={nameOf(workerId)} chat={chat} />
+        {items.map((item, i) => {
+          const { dayBreak, continued } = layout[i]
+          if (item.kind === 'notice') {
+            return (
+              <div key={item.notice.id}>
+                {dayBreak && <DayDivider timestamp={item.notice.timestamp} />}
+                <NoticeRow notice={item.notice} />
+              </div>
+            )
+          }
+          const post = item.post
+          return (
+            <div key={post.id}>
+              {dayBreak && <DayDivider timestamp={post.timestamp} />}
+              <MessageRow name={post.author_name} timestamp={post.timestamp} continued={continued}>
+                <div>{renderText(post.text)}</div>
+                <RoutingNote routing={post.routing} nameOf={nameOf} />
+              </MessageRow>
+            </div>
+          )
+        })}
+        {running.map(([workerId, chat], i) => (
+          <div key={workerId}>
+            {layout[items.length + i].dayBreak && <DayDivider timestamp={now} />}
+            <MessageRow name={nameOf(workerId)} timestamp={now} continued={false} live>
+              <Working chat={chat} renderText={renderText} />
+            </MessageRow>
+          </div>
         ))}
-      </div>
+      </MessageList>
 
-      <ChannelComposer channelId={id} members={state.members} />
+      <Composer
+        placeholder={`Message #${channel?.name ?? ''}`}
+        members={state.members}
+        onSend={async (text) => {
+          await api.post(id, text)
+        }}
+      />
     </section>
   )
 }
 
-function MemberSummary({ members }: { members: ChannelMember[] }) {
-  if (members.length === 0) return <>Just you</>
+/** Overlapping member avatars that open the channel's settings. */
+function MemberStack({ members, channelId }: { members: ChannelMember[]; channelId: string }) {
+  const shown = members.slice(0, 3)
   return (
-    <>
-      You,{' '}
-      {members.map((m, i) => (
-        <span key={m.worker_id} title={m.description || m.name}>
-          @{m.handle}
-          {i < members.length - 1 ? ', ' : ''}
+    <a
+      href={href({ page: 'channel-settings', id: channelId })}
+      className="btn-secondary gap-2 py-1 pl-1.5"
+      title={['You', ...members.map((m) => `${m.name} (@${m.handle})`)].join('\n')}
+    >
+      <span className="flex -space-x-1">
+        <span className="rounded ring-2 ring-page">
+          <Avatar name="You" size="xs" />
         </span>
-      ))}
-    </>
+        {shown.map((m) => (
+          <span key={m.worker_id} className="rounded ring-2 ring-page">
+            <Avatar name={m.name} size="xs" />
+          </span>
+        ))}
+      </span>
+      {members.length + 1}
+    </a>
   )
 }
 
-function Post({
-  post,
-  known,
-  nameOf,
-}: {
-  post: ChannelPost
-  known: Set<string>
-  nameOf: (workerId: string) => string
-}) {
-  const mine = post.author.kind === 'operator'
+/** Post text with known @mentions as chips. */
+function PostText({ text, known }: { text: string; known: Set<string> }): ReactNode {
   return (
-    <article className={mine ? 'post post-operator' : 'post'}>
-      <header className="post-meta">
-        <span className="post-author">{post.author_name}</span>
-        <time className="muted small" dateTime={post.timestamp}>
-          {new Date(post.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
-        </time>
-      </header>
-      <div className="text">
-        {segments(post.text, known).map((s, i) =>
-          s.kind === 'mention' ? (
-            <span key={i} className={s.handle === OPERATOR_HANDLE ? 'mention mention-me' : 'mention'}>
-              {s.text}
-            </span>
-          ) : (
-            <span key={i}>{s.text}</span>
-          ),
-        )}
-      </div>
-      <RoutingNote routing={post.routing} nameOf={nameOf} />
-    </article>
+    <span className="break-words whitespace-pre-wrap">
+      {segments(text, known).map((s, i) =>
+        s.kind === 'mention' ? (
+          <span
+            key={i}
+            className={`rounded px-0.5 font-medium ${
+              s.handle === OPERATOR_HANDLE ? 'bg-mention-me text-ink' : 'bg-mention text-mention-ink'
+            }`}
+          >
+            {s.text}
+          </span>
+        ) : (
+          <span key={i}>{s.text}</span>
+        ),
+      )}
+    </span>
   )
 }
 
 /** Who an unaddressed post was given to, and why. */
-function RoutingNote({
-  routing,
-  nameOf,
-}: {
-  routing: Routing
-  nameOf: (workerId: string) => string
-}) {
+function RoutingNote({ routing, nameOf }: { routing: Routing; nameOf: (workerId: string) => string }) {
+  const note = (children: ReactNode, extra = '') => (
+    <p className={`flex items-center gap-1 text-xs text-muted ${extra}`}>{children}</p>
+  )
   switch (routing.state) {
     case 'direct':
     case 'failed':
       // Failures are explained by a channel notice.
       return null
     case 'pending':
-      return <p className="routing muted small typing">Choosing who should answer…</p>
+      return note('Choosing who should answer…', 'animate-pulse')
     case 'chosen':
-      return (
-        <p className="routing muted small" title="Picked automatically from member descriptions and roles">
-          → {nameOf(routing.worker_id)}
-          {routing.reason && <> · {routing.reason}</>}
-        </p>
+      return note(
+        <>
+          <span aria-hidden>↳</span> Routed to <b className="font-bold text-ink">{nameOf(routing.worker_id)}</b>
+          {routing.reason && <span>· {routing.reason}</span>}
+        </>,
       )
     case 'nobody':
-      return (
-        <p className="routing muted small">
-          No reply needed{routing.reason && <> · {routing.reason}</>}
-        </p>
-      )
+      return note(<>No reply needed{routing.reason && <span>· {routing.reason}</span>}</>)
   }
 }
 
 /** A worker mid-turn: its finished steps (tool calls) and live output. */
-function Working({ name, chat }: { name: string; chat: ChatState }) {
+function Working({ chat, renderText }: { chat: ChatState; renderText: (text: string) => ReactNode }) {
   const results = toolResults(chat)
   return (
-    <article className="post post-live">
-      <header className="post-meta">
-        <span className="post-author">{name}</span>
-        <span className="muted small typing">working…</span>
-      </header>
+    <>
       {chat.messages
         .filter((m) => m.role === 'assistant' && !isToolResultMessage(m))
         .map((m) => (
-          <MessageView key={m.id} message={m} results={results} />
+          <MessageContent key={m.id} message={m} results={results} renderText={renderText} />
         ))}
-      {chat.live && chat.live.length > 0 && <LiveView blocks={chat.live} results={results} />}
-    </article>
-  )
-}
-
-function ChannelComposer({ channelId, members }: { channelId: string; members: ChannelMember[] }) {
-  const [text, setText] = useState('')
-  const [caret, setCaret] = useState(0)
-  const [highlight, setHighlight] = useState(0)
-  const [dismissed, setDismissed] = useState(false)
-  const [sending, setSending] = useState(false)
-  const [error, setError] = useState<string | null>(null)
-  const input = useRef<HTMLTextAreaElement>(null)
-  const pendingCaret = useRef<number | null>(null)
-
-  const at = mentionAt(text, caret)
-  const options = at && !dismissed ? suggest(members.map((m) => m.handle), at.query) : []
-  const active = Math.min(highlight, Math.max(options.length - 1, 0))
-
-  useLayoutEffect(() => {
-    if (pendingCaret.current !== null && input.current) {
-      input.current.setSelectionRange(pendingCaret.current, pendingCaret.current)
-      pendingCaret.current = null
-    }
-  }, [text])
-
-  const edit = (value: string, position: number) => {
-    setText(value)
-    setCaret(position)
-    setHighlight(0)
-    setDismissed(false)
-  }
-
-  const choose = (handle: string) => {
-    if (!at) return
-    const next = complete(text, caret, at, handle)
-    pendingCaret.current = next.caret
-    edit(next.text, next.caret)
-    input.current?.focus()
-  }
-
-  const send = async () => {
-    const value = text.trim()
-    if (!value || sending) return
-    setSending(true)
-    setError(null)
-    try {
-      await api.post(channelId, value)
-      edit('', 0)
-    } catch (e) {
-      setError(e instanceof Error ? e.message : String(e))
-    } finally {
-      setSending(false)
-    }
-  }
-
-  const onKeyDown = (e: KeyboardEvent<HTMLTextAreaElement>) => {
-    if (e.nativeEvent.isComposing) return
-    if (options.length > 0) {
-      if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
-        e.preventDefault()
-        const step = e.key === 'ArrowDown' ? 1 : -1
-        setHighlight((active + step + options.length) % options.length)
-        return
-      }
-      if (e.key === 'Enter' || e.key === 'Tab') {
-        e.preventDefault()
-        choose(options[active])
-        return
-      }
-      if (e.key === 'Escape') {
-        e.preventDefault()
-        setDismissed(true)
-        return
-      }
-    }
-    if (e.key === 'Enter' && !e.shiftKey) {
-      e.preventDefault()
-      void send()
-    }
-  }
-
-  const syncCaret = () => setCaret(input.current?.selectionStart ?? text.length)
-
-  return (
-    <form
-      className="composer"
-      onSubmit={(e) => {
-        e.preventDefault()
-        void send()
-      }}
-    >
-      {error && <p className="error small">{error}</p>}
-      <div className="composer-input">
-        {options.length > 0 && (
-          <ul className="mentions" role="listbox" aria-label="Mention suggestions">
-            {options.map((handle, i) => {
-              const member = members.find((m) => m.handle === handle)
-              return (
-                <li
-                  key={handle}
-                  role="option"
-                  aria-selected={i === active}
-                  className={i === active ? 'active' : undefined}
-                  onMouseDown={(e) => {
-                    e.preventDefault()
-                    choose(handle)
-                  }}
-                >
-                  <span className="mention">@{handle}</span>
-                  {member && <span className="muted small">{member.name}</span>}
-                </li>
-              )
-            })}
-          </ul>
-        )}
-        <textarea
-          ref={input}
-          value={text}
-          onChange={(e) => edit(e.target.value, e.target.selectionStart)}
-          onKeyDown={onKeyDown}
-          onKeyUp={(e) => {
-            if (e.key === 'ArrowLeft' || e.key === 'ArrowRight' || e.key === 'Home' || e.key === 'End') {
-              syncCaret()
-            }
-          }}
-          onClick={syncCaret}
-          placeholder="Message the channel (@ to mention someone, Enter to send)"
-          rows={3}
-          aria-label="Message"
-        />
-      </div>
-      <button type="submit" disabled={sending || !text.trim()}>
-        Send
-      </button>
-    </form>
+      {chat.live && <LiveContent blocks={chat.live} results={results} renderText={renderText} />}
+    </>
   )
 }

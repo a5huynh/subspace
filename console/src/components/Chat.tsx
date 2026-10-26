@@ -1,107 +1,100 @@
-import { useState, type KeyboardEvent } from 'react'
-
 import { api } from '../api/client'
 import type { WorkerSummary } from '../api/generated/WorkerSummary'
+import { layoutRows } from '../chat/format'
 import { timeline, toolResults } from '../chat/state'
 import { useWorkerChat } from '../chat/useWorkerChat'
-import { useScrollToBottom } from '../useScrollToBottom'
 import { href } from '../route'
-import { LiveView, MessageView } from './MessageView'
-import { StatusBadge } from './StatusBadge'
+import { useNow } from '../useNow'
+import { useScrollToBottom } from '../useScrollToBottom'
+import { LiveContent, MessageContent } from './MessageView'
+import {
+  Avatar,
+  Composer,
+  ConnectionDot,
+  ConversationHeader,
+  DayDivider,
+  EmptyState,
+  MessageList,
+  MessageRow,
+  NoticeRow,
+} from './ui'
 
+/** A direct message with one worker. */
 export function Chat({ worker }: { worker: WorkerSummary }) {
   const { state, connected, error } = useWorkerChat(worker.id)
   const status = state.status ?? worker.status
   const results = toolResults(state)
+  const now = useNow()
   const scroller = useScrollToBottom([state.messages, state.live, state.notices])
 
-  return (
-    <section className="chat">
-      <header className="chat-header">
-        <div>
-          <h2>{worker.name}</h2>
-          {worker.description && <p className="muted small">{worker.description}</p>}
-        </div>
-        <div className="chat-header-right">
-          <StatusBadge status={status} />
-          <span className={connected ? 'conn conn-on' : 'conn conn-off'}>
-            {connected ? 'live' : 'connecting…'}
-          </span>
-          <a className="button secondary" href={href({ page: 'settings', id: worker.id })}>
-            Settings
-          </a>
-        </div>
-      </header>
-
-      <div className="messages" ref={scroller}>
-        {error && <p className="error small">{error}</p>}
-        {state.messages.length === 0 && !state.live && (
-          <p className="muted empty">Say hello to {worker.name}.</p>
-        )}
-        {timeline(state).map((item) =>
-          item.kind === 'message' ? (
-            <MessageView key={item.message.id} message={item.message} results={results} />
-          ) : (
-            <p key={item.notice.id} className={`notice notice-${item.notice.level}`}>
-              {item.notice.text}
-            </p>
-          ),
-        )}
-        {state.live && <LiveView blocks={state.live} results={results} />}
-      </div>
-
-      <Composer workerId={worker.id} busy={status?.state === 'running'} />
-    </section>
-  )
-}
-
-function Composer({ workerId, busy }: { workerId: string; busy: boolean }) {
-  const [text, setText] = useState('')
-  const [sending, setSending] = useState(false)
-  const [error, setError] = useState<string | null>(null)
-
-  const send = async () => {
-    const value = text.trim()
-    if (!value || sending) return
-    setSending(true)
-    setError(null)
-    try {
-      await api.prompt(workerId, value)
-      setText('')
-    } catch (e) {
-      setError(e instanceof Error ? e.message : String(e))
-    } finally {
-      setSending(false)
-    }
-  }
-
-  const onKeyDown = (e: KeyboardEvent<HTMLTextAreaElement>) => {
-    if (e.key === 'Enter' && !e.shiftKey && !e.nativeEvent.isComposing) {
-      e.preventDefault()
-      void send()
-    }
-  }
+  const items = timeline(state)
+  const authors = [
+    ...items.map((item) => ({
+      author: item.kind === 'message' ? item.message.role : null,
+      timestamp: item.kind === 'message' ? item.message.timestamp : item.notice.timestamp,
+    })),
+    ...(state.live ? [{ author: 'assistant', timestamp: now }] : []),
+  ]
+  const layout = layoutRows(authors)
 
   return (
-    <form
-      className="composer"
-      onSubmit={(e) => {
-        e.preventDefault()
-        void send()
-      }}
-    >
-      {error && <p className="error small">{error}</p>}
-      <textarea
-        value={text}
-        onChange={(e) => setText(e.target.value)}
-        onKeyDown={onKeyDown}
-        placeholder={busy ? 'Working… (messages queue up)' : 'Message (Enter to send, Shift+Enter for a new line)'}
-        rows={3}
-        aria-label="Message"
+    <section className="flex min-h-0 flex-1 flex-col">
+      <ConversationHeader
+        title={
+          <>
+            <Avatar name={worker.name} size="sm" status={status} ring="ring-page" />
+            <span className="truncate">{worker.name}</span>
+          </>
+        }
+        subtitle={worker.description || undefined}
+        right={
+          <>
+            <ConnectionDot connected={connected} />
+            <a className="btn-secondary" href={href({ page: 'settings', id: worker.id })}>
+              Settings
+            </a>
+          </>
+        }
       />
-      <button type="submit" disabled={sending || !text.trim()}>
-        Send
-      </button>
-    </form>
+
+      <MessageList scroller={scroller}>
+        {error && <p className="px-5 text-[13px] text-danger">{error}</p>}
+        {items.length === 0 && !state.live && (
+          <EmptyState>
+            This is the very beginning of your direct message history with <b>{worker.name}</b>.
+          </EmptyState>
+        )}
+        {items.map((item, i) => {
+          const { dayBreak, continued } = layout[i]
+          const timestamp = item.kind === 'message' ? item.message.timestamp : item.notice.timestamp
+          return (
+            <div key={item.kind === 'message' ? item.message.id : item.notice.id}>
+              {dayBreak && <DayDivider timestamp={timestamp} />}
+              {item.kind === 'message' ? (
+                <MessageRow
+                  name={item.message.role === 'user' ? 'You' : worker.name}
+                  timestamp={timestamp}
+                  continued={continued}
+                >
+                  <MessageContent message={item.message} results={results} />
+                </MessageRow>
+              ) : (
+                <NoticeRow notice={item.notice} />
+              )}
+            </div>
+          )
+        })}
+        {state.live && (
+          <>
+            {layout[items.length].dayBreak && <DayDivider timestamp={now} />}
+            <MessageRow name={worker.name} timestamp={now} continued={layout[items.length].continued} live>
+              <LiveContent blocks={state.live} results={results} />
+            </MessageRow>
+          </>
+        )}
+      </MessageList>
+
+      <Composer placeholder={`Message ${worker.name}`} onSend={(text) => api.prompt(worker.id, text)} />
+    </section>
   )
 }

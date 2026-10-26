@@ -6,6 +6,7 @@ import type { ChannelMember } from '../api/generated/ChannelMember'
 import type { WorkerSummary } from '../api/generated/WorkerSummary'
 import type { WorkspaceDetail } from '../api/generated/WorkspaceDetail'
 import { href, navigate } from '../route'
+import { Avatar, Panel } from './ui'
 
 interface Props {
   workspace: WorkspaceDetail | null
@@ -49,12 +50,12 @@ export function NewChannelForm({ workspace, workers, onChanged }: Props) {
     setMembers((m) => (m.includes(id) ? m.filter((x) => x !== id) : [...m, id]))
 
   return (
-    <section className="panel">
-      <h2>New channel</h2>
-      <form className="form" onSubmit={submit}>
-        <label>
+    <Panel title="Create a channel">
+      <form className="flex flex-col gap-5" onSubmit={submit}>
+        <label className="label">
           Name
           <input
+            className="field"
             value={name}
             onChange={(e) => setName(e.target.value)}
             placeholder="e.g. launch-plan"
@@ -62,42 +63,45 @@ export function NewChannelForm({ workspace, workers, onChanged }: Props) {
             autoFocus
           />
         </label>
-        <label>
+        <label className="label">
           Topic
           <input
+            className="field"
             value={topic}
             onChange={(e) => setTopic(e.target.value)}
             placeholder="What this channel is working on"
           />
         </label>
-        <fieldset className="checklist">
-          <legend>Members</legend>
+        <fieldset className="flex flex-col gap-1 rounded-md border border-line p-3">
+          <legend className="px-1 text-sm font-bold">Members</legend>
           {candidates.length === 0 && (
-            <p className="muted small">
+            <p className="text-sm text-muted">
               No workers yet. <a href={href({ page: 'new' })}>Create one</a> first.
             </p>
           )}
           {candidates.map((w) => (
-            <label key={w.id} className="check">
+            <label key={w.id} className="flex cursor-pointer items-center gap-2.5 rounded-md px-2 py-1.5 hover:bg-hover">
               <input
                 type="checkbox"
+                className="size-4 accent-send"
                 checked={members.includes(w.id)}
                 onChange={() => toggle(w.id)}
               />
-              <span>{w.name}</span>
-              {w.description && <span className="muted small">{w.description}</span>}
+              <Avatar name={w.name} size="sm" />
+              <span className="font-bold">{w.name}</span>
+              {w.description && <span className="truncate text-sm text-muted">{w.description}</span>}
             </label>
           ))}
         </fieldset>
 
-        {error && <p className="error">{error}</p>}
-        <div className="actions">
-          <button type="submit" disabled={saving || !workspace}>
+        {error && <p className="text-danger">{error}</p>}
+        <div>
+          <button type="submit" className="btn-primary" disabled={saving || !workspace}>
             Create channel
           </button>
         </div>
       </form>
-    </section>
+    </Panel>
   )
 }
 
@@ -128,9 +132,9 @@ export function ChannelSettings({ id, workspace, workers, onChanged }: Props & {
 
   if (name === null) {
     return (
-      <section className="panel">
-        {error ? <p className="error">{error}</p> : <p className="muted">Loading…</p>}
-      </section>
+      <Panel title="Channel settings">
+        {error ? <p className="text-danger">{error}</p> : <p className="text-muted">Loading…</p>}
+      </Panel>
     )
   }
 
@@ -168,38 +172,41 @@ export function ChannelSettings({ id, workspace, workers, onChanged }: Props & {
   const addable = workspaceWorkers(workspace, workers).filter((w) => !memberIds.has(w.id))
 
   return (
-    <section className="panel">
-      <h2>#{name} settings</h2>
-      <form className="form" onSubmit={save}>
-        <label>
+    <Panel title={<># {name} settings</>}>
+      <form className="flex flex-col gap-5" onSubmit={save}>
+        <label className="label">
           Name
-          <input value={name} onChange={(e) => setName(e.target.value)} required />
+          <input className="field" value={name} onChange={(e) => setName(e.target.value)} required />
         </label>
-        <label>
+        <label className="label">
           Topic
-          <input value={topic} onChange={(e) => setTopic(e.target.value)} />
+          <input className="field" value={topic} onChange={(e) => setTopic(e.target.value)} />
         </label>
-        <div className="actions">
-          <button type="submit">Save</button>
-          <a className="button secondary" href={href({ page: 'channel', id })}>
+        <div className="flex items-center gap-2.5">
+          <button type="submit" className="btn-primary">
+            Save
+          </button>
+          <a className="btn-secondary" href={href({ page: 'channel', id })}>
             Back to channel
           </a>
         </div>
       </form>
 
-      <h3>Members</h3>
-      <ul className="member-list">
-        <li>
-          <span>You</span>
-          <span className="muted small">@you · always here</span>
+      <h2 className="mt-8 mb-2 text-lg font-black">Members</h2>
+      <ul className="divide-y divide-line rounded-md border border-line">
+        <li className="flex items-center gap-2.5 px-3 py-2">
+          <Avatar name="You" size="sm" />
+          <span className="font-bold">You</span>
+          <span className="text-sm text-muted">@you · always here</span>
         </li>
         {members.map((m) => (
-          <li key={m.worker_id}>
-            <span>{m.name}</span>
-            <span className="muted small">@{m.handle}</span>
+          <li key={m.worker_id} className="flex items-center gap-2.5 px-3 py-2">
+            <Avatar name={m.name} size="sm" />
+            <span className="font-bold">{m.name}</span>
+            <span className="truncate text-sm text-muted">@{m.handle}</span>
             <button
               type="button"
-              className="secondary small-button"
+              className="btn-secondary ml-auto py-0.5 text-xs"
               onClick={() => void run(() => api.removeChannelMember(id, m.worker_id))}
             >
               Remove
@@ -208,8 +215,13 @@ export function ChannelSettings({ id, workspace, workers, onChanged }: Props & {
         ))}
       </ul>
       {addable.length > 0 && (
-        <div className="add-member">
-          <select value={adding} onChange={(e) => setAdding(e.target.value)} aria-label="Add a member">
+        <div className="mt-3 flex gap-2.5">
+          <select
+            className="field"
+            value={adding}
+            onChange={(e) => setAdding(e.target.value)}
+            aria-label="Add a member"
+          >
             <option value="">Add a worker…</option>
             {addable.map((w) => (
               <option key={w.id} value={w.id}>
@@ -219,6 +231,7 @@ export function ChannelSettings({ id, workspace, workers, onChanged }: Props & {
           </select>
           <button
             type="button"
+            className="btn-primary"
             disabled={!adding}
             onClick={() =>
               void run(() => api.addChannelMember(id, adding)).then((ok) => ok && setAdding(''))
@@ -229,14 +242,14 @@ export function ChannelSettings({ id, workspace, workers, onChanged }: Props & {
         </div>
       )}
 
-      {error && <p className="error">{error}</p>}
-      {saved && <p className="success">Saved.</p>}
+      {error && <p className="mt-3 text-danger">{error}</p>}
+      {saved && <p className="mt-3 text-send">Saved.</p>}
 
-      <div className="actions danger-zone">
-        <button type="button" className="danger" onClick={() => void remove()}>
+      <div className="mt-10 border-t border-line pt-5">
+        <button type="button" className="btn-danger" onClick={() => void remove()}>
           Delete channel
         </button>
       </div>
-    </section>
+    </Panel>
   )
 }

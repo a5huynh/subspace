@@ -3,6 +3,7 @@ import { ChannelView } from './components/ChannelView'
 import { Chat } from './components/Chat'
 import { Sidebar } from './components/Sidebar'
 import { WorkerForm } from './components/WorkerForm'
+import { EmptyState, Panel } from './components/ui'
 import { href, useRoute } from './route'
 import { useWorkers } from './useWorkers'
 import { useWorkspace } from './useWorkspace'
@@ -29,9 +30,7 @@ export default function App() {
       main = worker ? (
         <Chat key={worker.id} worker={worker} />
       ) : (
-        <section className="panel">
-          <p className="muted">{workers ? 'No such worker.' : 'Loading…'}</p>
-        </section>
+        <EmptyState>{workers ? 'No such worker.' : 'Loading…'}</EmptyState>
       )
       break
     }
@@ -54,22 +53,21 @@ export default function App() {
       break
     case 'home':
       main = (
-        <section className="panel">
-          <h2>{workspace?.workspace.name ?? 'Subspace'}</h2>
-          <p className="muted">
+        <Panel title={`Welcome to ${workspace?.workspace.name ?? 'Subspace'}`}>
+          <p className="text-muted">
             Open a channel to work with several workers together, or a direct message to talk to
             one. <a href={href({ page: 'new-channel' })}>Create a channel</a> or{' '}
             <a href={href({ page: 'new' })}>a worker</a>.
           </p>
-        </section>
+        </Panel>
       )
       break
   }
 
   return (
-    <div className="layout">
+    <div className="grid h-full grid-cols-[260px_minmax(0,1fr)]">
       <Sidebar workspace={workspace} workers={workers} error={error} route={route} />
-      <main className="main">{main}</main>
+      <main className="flex min-h-0 flex-col">{main}</main>
     </div>
   )
 }
